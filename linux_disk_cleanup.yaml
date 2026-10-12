@@ -1,6 +1,6 @@
 ---
 - name: Housekeep /opt file system on Linux VMs
-  hosts: all
+  hosts: linux-test
   gather_facts: true
   vars:
     target_fs: "/opt"
