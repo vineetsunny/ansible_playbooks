@@ -89,14 +89,15 @@
       register: opt_df_before
       changed_when: false
 
-    - name: Set initial filesystem usage
-      ansible.builtin.set_fact:
-        usage_before: >-
-          {{
-            opt_df_before.stdout_lines[1].split()[-2]
-            | regex_replace('%', '')
-            | int
-          }}
+- name: Set initial filesystem usage
+  ansible.builtin.set_fact:
+    usage_before: >-
+      {{
+        (
+          opt_df_before.stdout_lines[1].split()[-2]
+          | regex_replace('%', '')
+        ) | int
+      }}
 
     - name: Log initial filesystem usage
       ansible.builtin.lineinfile:
