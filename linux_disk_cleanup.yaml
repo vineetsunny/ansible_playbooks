@@ -1,7 +1,10 @@
+
 ---
 - name: Housekeep /opt file system on Linux VMs
   hosts: linux-test
   gather_facts: true
+  become: true
+
   vars:
     target_fs: "/opt"
     threshold: 75
@@ -27,26 +30,40 @@
 
     - name: Verify if /opt is a mounted file system
       ansible.builtin.set_fact:
-        is_mounted: "{{ ansible_mounts | selectattr('mount', 'equalto', target_fs) | list | length > 0 }}"
+        is_mounted: >-
+          {{ ansible_mounts
+             | selectattr('mount', 'equalto', target_fs)
+             | list | length > 0 }}
 
     - name: Exit 22 - File system not mounted
       ansible.builtin.fail:
         msg: "EXIT 22: File system {{ target_fs }} is not mounted."
-      when: not is_mounted
+      when: not (is_mounted | bool)
 
-    - name: Get current disk usage percentage for /opt
+    - name: Get current disk space values
       ansible.builtin.set_fact:
-        initial_usage: "{{ (ansible_mounts | selectattr('mount', 'equalto', target_fs) | first).size_available }}"
-        total_size: "{{ (ansible_mounts | selectattr('mount', 'equalto', target_fs) | first).size_total }}"
+        initial_usage: >-
+          {{ (ansible_mounts
+              | selectattr('mount', 'equalto', target_fs)
+              | first).size_available | int }}
+        total_size: >-
+          {{ (ansible_mounts
+              | selectattr('mount', 'equalto', target_fs)
+              | first).size_total | int }}
 
     - name: Calculate usage percentage
       ansible.builtin.set_fact:
-        usage_pct: "{{ (((total_size | float - initial_usage | float) / total_size | float) * 100) | round(1, 'common') }}"
+        usage_pct: >-
+          {{ (((total_size | float - initial_usage | float)
+              / total_size | float) * 100)
+             | round(1, 'common') }}
 
     - name: Log current disk space
       ansible.builtin.lineinfile:
         path: "{{ log_file }}"
-        line: "{{ lookup('pipe', 'date +\"%b %d %T\"') }} - Current usage on {{ target_fs }} is {{ usage_pct }}%"
+        line: >-
+          {{ lookup('pipe', 'date +"%b %d %T"') }}
+          - Current usage on {{ target_fs }} is {{ usage_pct }}%
 
     - name: Exit 0 - Under threshold (Housekeeping Not Required)
       ansible.builtin.meta: end_host
@@ -55,22 +72,41 @@
     - name: Find candidate files for cleanup in target subdirectories
       ansible.builtin.shell: |
         set -o pipefail
-        > {{ find_file_list }}
-        # Patrol logs/temp older than 7 days
-        [ -d /opt/patrol ] && find /opt/patrol -type f \( -name "*.log" -o -name "*.tmp" \) -mtime +7 >> {{ find_file_list }}
-        # Control-M log files older than 14 days
-        [ -d /opt/controlm ] && find /opt/controlm -type f \( -name "*.log" -o -name "sysout*" \) -mtime +14 >> {{ find_file_list }}
-        # NetBackup logs
+        : > "{{ find_file_list }}"
+
+        if [ -d /opt/patrol ]; then
+          find /opt/patrol -type f \
+            \( -name "*.log" -o -name "*.tmp" \) \
+            -mtime +7 -print >> "{{ find_file_list }}"
+        fi
+
+        if [ -d /opt/controlm ]; then
+          find /opt/controlm -type f \
+            \( -name "*.log" -o -name "sysout*" \) \
+            -mtime +14 -print >> "{{ find_file_list }}"
+        fi
+
         for dir in nbu NBU82; do
-          [ -d /opt/$dir ] && find /opt/$dir -type f -name "*.log" -mtime +7 >> {{ find_file_list }}
+          if [ -d "/opt/$dir" ]; then
+            find "/opt/$dir" -type f \
+              -name "*.log" -mtime +7 -print >> "{{ find_file_list }}"
+          fi
         done
-        # WAS Support logs & trc
-        [ -d /opt/IBM ] && find /opt/IBM -type f \( -name "*.log" -o -name "*.trc" \) -mtime +7 >> {{ find_file_list }}
-        # VCS Debuginfo
+
+        if [ -d /opt/IBM ]; then
+          find /opt/IBM -type f \
+            \( -name "*.log" -o -name "*.trc" \) \
+            -mtime +7 -print >> "{{ find_file_list }}"
+        fi
+
         for dir in VRTSvxvm VRTSaslapm; do
-          [ -d /opt/$dir ] && find /opt/$dir -type f -name "*.debug*" -mtime +7 >> {{ find_file_list }}
+          if [ -d "/opt/$dir" ]; then
+            find "/opt/$dir" -type f \
+              -name "*.debug*" -mtime +7 -print >> "{{ find_file_list }}"
+          fi
         done
-        cat {{ find_file_list }}
+
+        cat "{{ find_file_list }}"
       args:
         executable: /bin/bash
       register: found_files
@@ -81,25 +117,37 @@
         msg: "EXIT 3: No files found matching cleanup criteria."
       when: found_files.stdout_lines | length == 0
 
-    - name: Compress/Zip large logs (>50MB) found in criteria list
+    - name: Compress large logs over 50 MB
       ansible.builtin.shell: |
-        while read -r file; do
-          if [ -f "$file" ] && [ $(stat -c%s "$file") -gt 52428800 ] && [[ "$file" != *.gz ]]; then
-            gzip "$file" && echo "$(date +"%b %d %T") - Zipped $file" >> {{ log_file }}
+        while IFS= read -r file; do
+          if [ -f "$file" ] &&
+             [ "$(stat -c%s "$file")" -gt 52428800 ] &&
+             [[ "$file" != *.gz ]]; then
+            if gzip -- "$file"; then
+              echo "$(date +"%b %d %T") - Zipped $file" \
+                >> "{{ log_file }}"
+            fi
           fi
-        done < {{ find_file_list }}
+        done < "{{ find_file_list }}"
       args:
         executable: /bin/bash
+      register: compression_result
+      changed_when: compression_result.stdout != ""
 
-    - name: Delete files older than threshold
+    - name: Delete eligible files remaining after compression
       ansible.builtin.shell: |
-        while read -r file; do
+        while IFS= read -r file; do
           if [ -f "$file" ]; then
-            rm -f "$file" && echo "$(date +"%b %d %T") - Deleted $file" >> {{ log_file }}
+            if rm -f -- "$file"; then
+              echo "$(date +"%b %d %T") - Deleted $file" \
+                >> "{{ log_file }}"
+            fi
           fi
-        done < {{ find_file_list }}
+        done < "{{ find_file_list }}"
       args:
         executable: /bin/bash
+      register: deletion_result
+      changed_when: deletion_result.stdout != ""
 
     - name: Re-gather facts to recalculate post-cleanup space
       ansible.builtin.setup:
@@ -108,33 +156,39 @@
 
     - name: Get final disk space values
       ansible.builtin.set_fact:
-        final_usage: >-
+        final_available: >-
           {{ (ansible_mounts
               | selectattr('mount', 'equalto', target_fs)
-              | first).size_available }}
+              | first).size_available | int }}
         final_total_size: >-
           {{ (ansible_mounts
               | selectattr('mount', 'equalto', target_fs)
-              | first).size_total }}
+              | first).size_total | int }}
 
     - name: Calculate final disk space percentage
       ansible.builtin.set_fact:
         final_usage_pct: >-
           {{ (((final_total_size | float -
-                final_usage | float) /
+                final_available | float) /
                 final_total_size | float) * 100)
              | round(1, 'common') }}
 
     - name: Log cleanup results
       ansible.builtin.lineinfile:
         path: "{{ log_file }}"
-        line: "{{ lookup('pipe', 'date +\"%b %d %T\"') }} - Final usage on {{ target_fs }} is {{ final_usage_pct }}%"
+        line: >-
+          {{ lookup('pipe', 'date +"%b %d %T"') }}
+          - Final usage on {{ target_fs }} is {{ final_usage_pct }}%
 
     - name: Exit 2 - Disk usage unchanged after housekeeping
       ansible.builtin.fail:
-        msg: "EXIT 2: Still same after housekeeping (Usage was {{ usage_pct }}%, now {{ final_usage_pct }}%)."
+        msg: >-
+          EXIT 2: Usage did not decrease after housekeeping.
+          Usage was {{ usage_pct }}%, now {{ final_usage_pct }}%.
       when: final_usage_pct | float >= usage_pct | float
 
     - name: Exit 1 - Housekeeping performed successfully
       ansible.builtin.debug:
-        msg: "EXIT 1: Housekeeping successfully performed. Usage dropped from {{ usage_pct }}% to {{ final_usage_pct }}%."
+        msg: >-
+          EXIT 1: Housekeeping successfully performed.
+          Usage dropped from {{ usage_pct }}% to {{ final_usage_pct }}%.
