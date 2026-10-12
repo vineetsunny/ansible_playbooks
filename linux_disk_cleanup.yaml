@@ -110,20 +110,23 @@
           threshold={{ threshold }}%
         insertafter: EOF
 
+    
     - name: Skip housekeeping when usage is within threshold
       ansible.builtin.set_fact:
         housekeeping_status: "NOT_REQUIRED"
-      when: usage_before <= threshold
+      when: (usage_before | int) <= (threshold | int)
 
     - name: Report housekeeping not required
       ansible.builtin.debug:
         msg: >-
           EXIT 0 - Housekeeping not required.
-          Current usage={{ usage_before }}%, threshold={{ threshold }}%.
-      when: usage_before <= threshold
+          Current usage={{ usage_before }}%,
+          threshold={{ threshold }}%.
+      when: (usage_before | int) <= (threshold | int)
+
 
     - name: Discover eligible files and directories
-      when: usage_before > threshold
+      when: (usage_before | int) > (threshold | int)
       block:
 
         - name: Find old Patrol log files
