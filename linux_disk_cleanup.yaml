@@ -1,5 +1,5 @@
 ---
-- name: Housekeep /opt filesystem on Linux VMs
+- name: Housekeep /opt filesystem on Linux
   hosts: linux-test
   become: true
   gather_facts: true
