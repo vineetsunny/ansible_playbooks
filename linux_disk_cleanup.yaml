@@ -101,14 +101,29 @@
       args:
         executable: /bin/bash
 
-    - name: Re-gather facts to re-calculate post-cleanup space
+    - name: Re-gather facts to recalculate post-cleanup space
       ansible.builtin.setup:
-        filter: ansible_mounts
+        filter:
+          - ansible_mounts
+
+    - name: Get final disk space values
+      ansible.builtin.set_fact:
+        final_usage: >-
+          {{ (ansible_mounts
+              | selectattr('mount', 'equalto', target_fs)
+              | first).size_available }}
+        final_total_size: >-
+          {{ (ansible_mounts
+              | selectattr('mount', 'equalto', target_fs)
+              | first).size_total }}
 
     - name: Calculate final disk space percentage
       ansible.builtin.set_fact:
-        final_usage: "{{ (ansible_mounts | selectattr('mount', 'equalto', target_fs) | first).size_available }}"
-        final_usage_pct: "{{ (((total_size | float - final_usage | float) / total_size | float) * 100) | round(1, 'common') }}"
+        final_usage_pct: >-
+          {{ (((final_total_size | float -
+                final_usage | float) /
+                final_total_size | float) * 100)
+             | round(1, 'common') }}
 
     - name: Log cleanup results
       ansible.builtin.lineinfile:
