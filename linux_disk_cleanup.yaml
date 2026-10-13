@@ -12,7 +12,7 @@
     find_file_list: "/var/tmp/findfiles.txt"
 
     # Keep false until the candidate list is reviewed.
-    housekeeping_enabled: false
+    housekeeping_enabled: true
 
     # NetBackup deletion requires explicit approval.
     enable_netbackup_cleanup: false
