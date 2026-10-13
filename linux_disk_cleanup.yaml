@@ -1,533 +1,550 @@
 ---
-- name: Housekeep /opt filesystem on Linux
+- name: Housekeep /opt filesystem on Linux VMs
   hosts: linux-test
   become: true
   gather_facts: true
-  serial: 1
 
   vars:
     target_fs: "/opt"
     threshold: 75
+
     log_file: "/var/log/dc-tanium-housekeeping-psd-task.log"
     find_file_list: "/var/tmp/findfiles.txt"
 
-    # Keep false until the candidate list is reviewed.
+    # Set false for discovery/reporting only.
     housekeeping_enabled: true
 
-    # NetBackup deletion requires explicit approval.
+    # Keep NetBackup directories excluded from deletion.
     enable_netbackup_cleanup: false
 
-    patrol_dir: "/opt/patrol"
-    was_dir: "/opt/IBM"
-    controlm_dir: "/opt/controlm"
-
-    patrol_age_days: 1
-    was_archive_age_days: 7
-    was_compress_age_days: 1
-    controlm_age_days: 3
-    vcs_debug_age_days: 30
-
-    # Protect files currently held open by a process.
+    # If fuser is unavailable, do not modify candidate files.
     check_file_usage: true
 
+    patrol_age_days: 1
+    controlm_age_days: 3
+    was_archive_age_days: 7
+    was_log_age_days: 1
+    vcs_debug_age_days: 30
+
+    patrol_search_paths:
+      - "/opt/patrol/PATROL/log"
+      - "/opt/patrol/PATROL/log/history/{{ ansible_hostname }}/3300"
+      - "/opt/patrol/PATROL/log/history/{{ ansible_hostname }}/3399"
+
+    vcs_debug_paths:
+      - "/opt/VRTSvxvm/debuginfo"
+      - "/opt/VRTSaslapm/debuginfo"
+
   tasks:
-    - name: Initialize housekeeping status
-      ansible.builtin.set_fact:
-        housekeeping_status: "NOT_STARTED"
-        housekeeping_actions: []
-        housekeeping_candidates: []
-        housekeeping_errors: []
-
-    - name: Ensure the log directory is available
+    - name: Ensure report and log directories are available
       ansible.builtin.file:
-        path: "{{ log_file | dirname }}"
+        path: "{{ item }}"
         state: directory
-        owner: root
-        group: root
-        mode: "0755"
+        mode: "0750"
+      loop:
+        - "/var/tmp"
+        - "/var/log"
 
-    - name: Ensure housekeeping log exists
-      ansible.builtin.file:
-        path: "{{ log_file }}"
-        state: touch
-        owner: root
-        group: root
-        mode: "0600"
-        modification_time: preserve
-        access_time: preserve
-
-    - name: Verify /opt exists
-      ansible.builtin.stat:
-        path: "{{ target_fs }}"
-      register: opt_stat
-
-    - name: Stop if /opt does not exist
-      ansible.builtin.fail:
-        msg: "EXIT 21 - Directory not present: {{ target_fs }}"
-      when: not opt_stat.stat.exists or not opt_stat.stat.isdir
-
-    - name: Collect mounted filesystem information
-      ansible.builtin.set_fact:
-        opt_mount: >-
-          {{
-            ansible_mounts
-            | selectattr('mount', 'equalto', target_fs)
-            | list
-          }}
-
-    - name: Verify /opt is a mounted filesystem
-      ansible.builtin.fail:
-        msg: "EXIT 22 - Filesystem is not mounted at {{ target_fs }}"
-      when: opt_mount | length == 0
-
-    - name: Read current /opt filesystem usage
+    - name: Get initial filesystem usage
       ansible.builtin.command:
         argv:
           - df
           - -P
           - "{{ target_fs }}"
-      register: opt_df_before
+      register: df_before
       changed_when: false
 
-    - name: Set initial filesystem usage
+    - name: Set initial filesystem usage percentage
       ansible.builtin.set_fact:
         usage_before: >-
           {{
-            (
-              opt_df_before.stdout_lines[1].split()[-2]
-              | regex_replace('%', '')
-            ) | int
+            df_before.stdout_lines[1].split()[4]
+            | regex_replace('%', '')
+            | int
           }}
 
-    - name: Display filesystem threshold values
+    - name: Initialize candidate lists
+      ansible.builtin.set_fact:
+        housekeeping_candidates: []
+        housekeeping_compress_candidates: []
+        patrol_candidates: []
+        was_archive_candidates: []
+        controlm_candidates: []
+        vcs_candidates: []
+        was_log_dirs_list: []
+
+    - name: Check optional Patrol directories
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ patrol_search_paths }}"
+      register: patrol_path_stats
+      when: usage_before | int > threshold
+
+    - name: Build list of existing Patrol directories
+      ansible.builtin.set_fact:
+        existing_patrol_paths: >-
+          {{
+            patrol_path_stats.results
+            | default([])
+            | selectattr('stat.isdir', 'defined')
+            | selectattr('stat.isdir')
+            | map(attribute='item')
+            | list
+          }}
+      when: usage_before | int > threshold
+
+    - name: Find eligible Patrol log files
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        recurse: false
+        file_type: file
+        age: "{{ patrol_age_days }}d"
+        age_stamp: mtime
+        patterns:
+          - "*.err5.*"
+          - "*.audit.*"
+          - "*.PEM.*"
+          - "param.hist.*"
+          - "dir.*"
+          - "annotate.dat.*"
+      loop: "{{ existing_patrol_paths | default([]) }}"
+      register: patrol_files
+      when:
+        - usage_before | int > threshold
+        - existing_patrol_paths | default([]) | length > 0
+
+    - name: Check Control-M directory
+      ansible.builtin.stat:
+        path: "/opt/controlm"
+      register: controlm_dir_stat
+      when: usage_before | int > threshold
+
+    - name: Find eligible Control-M files
+      ansible.builtin.find:
+        paths:
+          - "/opt/controlm"
+        recurse: true
+        depth: 4
+        file_type: file
+        age: "{{ controlm_age_days }}d"
+        age_stamp: mtime
+      register: controlm_files
+      when:
+        - usage_before | int > threshold
+        - controlm_dir_stat.stat.isdir | default(false)
+
+    - name: Find WAS server log directories
+      ansible.builtin.find:
+        paths:
+          - "/opt/IBM/wlp/usr/servers"
+        recurse: true
+        file_type: directory
+        patterns:
+          - "logs"
+      register: was_log_dirs
+      when: usage_before | int > threshold
+      failed_when: false
+
+    - name: Save WAS log directory list
+      ansible.builtin.set_fact:
+        was_log_dirs_list: >-
+          {{
+            was_log_dirs.files
+            | default([])
+            | map(attribute='path')
+            | list
+          }}
+      when: usage_before | int > threshold
+
+    - name: Find old WAS log archives
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        recurse: false
+        file_type: file
+        age: "{{ was_archive_age_days }}d"
+        age_stamp: mtime
+        patterns:
+          - "*.zip"
+          - "*.gz"
+          - "*.bz2"
+      loop: "{{ was_log_dirs_list | default([]) }}"
+      register: was_archives
+      when:
+        - usage_before | int > threshold
+        - was_log_dirs_list | default([]) | length > 0
+
+    - name: Find older WAS logs eligible for compression
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        recurse: false
+        file_type: file
+        age: "{{ was_log_age_days }}d"
+        age_stamp: mtime
+        patterns:
+          - "messages_*.log"
+          - "messages_*.log.*"
+          - "console_*.log"
+          - "console_*.log.*"
+        excludes:
+          - "*.zip"
+          - "*.gz"
+          - "*.bz2"
+      loop: "{{ was_log_dirs_list | default([]) }}"
+      register: was_compress_files
+      when:
+        - usage_before | int > threshold
+        - was_log_dirs_list | default([]) | length > 0
+
+    - name: Check optional VCS debug directories
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ vcs_debug_paths }}"
+      register: vcs_path_stats
+      when: usage_before | int > threshold
+
+    - name: Build list of existing VCS debug directories
+      ansible.builtin.set_fact:
+        existing_vcs_paths: >-
+          {{
+            vcs_path_stats.results
+            | default([])
+            | selectattr('stat.isdir', 'defined')
+            | selectattr('stat.isdir')
+            | map(attribute='item')
+            | list
+          }}
+      when: usage_before | int > threshold
+
+    - name: Find old VCS debug files
+      ansible.builtin.find:
+        paths: "{{ item }}"
+        recurse: true
+        file_type: file
+        age: "{{ vcs_debug_age_days }}d"
+        age_stamp: mtime
+      loop: "{{ existing_vcs_paths | default([]) }}"
+      register: vcs_files
+      when:
+        - usage_before | int > threshold
+        - existing_vcs_paths | default([]) | length > 0
+
+    - name: Build housekeeping candidate lists
+      ansible.builtin.set_fact:
+        patrol_candidates: >-
+          {{
+            patrol_files.results | default([])
+            | selectattr('files', 'defined')
+            | map(attribute='files') | flatten | list
+          }}
+        was_archive_candidates: >-
+          {{
+            was_archives.results | default([])
+            | selectattr('files', 'defined')
+            | map(attribute='files') | flatten | list
+          }}
+        controlm_candidates: >-
+          {{ controlm_files.files | default([]) }}
+        vcs_candidates: >-
+          {{
+            vcs_files.results | default([])
+            | selectattr('files', 'defined')
+            | map(attribute='files') | flatten | list
+          }}
+        housekeeping_compress_candidates: >-
+          {{
+            was_compress_files.results | default([])
+            | selectattr('files', 'defined')
+            | map(attribute='files') | flatten | list
+          }}
+      when: usage_before | int > threshold
+
+    - name: Combine deletion candidates
+      ansible.builtin.set_fact:
+        housekeeping_candidates: >-
+          {{
+            patrol_candidates
+            + was_archive_candidates
+            + controlm_candidates
+            + vcs_candidates
+          }}
+      when: usage_before | int > threshold
+
+    - name: Write housekeeping candidate report
+      ansible.builtin.copy:
+        dest: "{{ find_file_list }}"
+        mode: "0640"
+        content: |
+          Filesystem: {{ target_fs }}
+          Usage before: {{ usage_before }}%
+          Threshold: {{ threshold }}%
+
+          Deletion candidates:
+          {% for f in housekeeping_candidates | default([]) %}
+          {{ f.path }}
+          {% else %}
+          None
+          {% endfor %}
+
+          Compression candidates:
+          {% for f in housekeeping_compress_candidates | default([]) %}
+          {{ f.path }}
+          {% else %}
+          None
+          {% endfor %}
+
+          NetBackup directories (excluded from deletion):
+          /opt/nbu
+          /opt/NBU82
+
+    - name: Report candidate discovery results
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem: {{ target_fs }}"
+          - "Usage before: {{ usage_before }}%; threshold: {{ threshold }}%"
+          - "Patrol candidates: {{ patrol_candidates | length }}"
+          - "WAS archive candidates: {{ was_archive_candidates | length }}"
+          - "Control-M candidates: {{ controlm_candidates | length }}"
+          - "VCS debug candidates: {{ vcs_candidates | length }}"
+          - "WAS compression candidates: {{ housekeeping_compress_candidates | length }}"
+          - "Total deletion candidates: {{ housekeeping_candidates | length }}"
+          - "Candidate report: {{ find_file_list }}"
+
+    - name: Log initial usage and candidate counts
+      ansible.builtin.shell: |
+        printf '%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ) host={{ ansible_hostname }} filesystem={{ target_fs }} usage_before={{ usage_before }}% threshold={{ threshold }}%" \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ) host={{ ansible_hostname }} deletion_candidates={{ housekeeping_candidates | length }} compression_candidates={{ housekeeping_compress_candidates | length }}" \
+          >> {{ log_file | quote }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: usage_before | int > threshold
+
+    - name: Stop before modifying files when housekeeping is disabled
+      ansible.builtin.debug:
+        msg: >-
+          Discovery-only mode. No files will be deleted or compressed.
+          Review {{ find_file_list }} before setting housekeeping_enabled=true.
+      when:
+        - usage_before | int > threshold
+        - not housekeeping_enabled | bool
+
+    - name: Warn when no eligible files were found
+      ansible.builtin.debug:
+        msg: >-
+          /opt is above threshold, but no eligible files were found.
+          Review {{ find_file_list }}, the directory paths, filename patterns,
+          and file ages. No files will be modified.
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+        - housekeeping_candidates | length == 0
+        - housekeeping_compress_candidates | length == 0
+
+    - name: Compress eligible WAS logs
+      ansible.builtin.shell: |
+        set -eu
+        file={{ item.path | quote }}
+
+        [ -f "$file" ] || {
+          echo "SKIPPED_MISSING: $file"
+          exit 0
+        }
+
+        [ ! -L "$file" ] || {
+          echo "SKIPPED_SYMLINK: $file"
+          exit 0
+        }
+
+        case "$file" in
+          /opt/IBM/*) ;;
+          *)
+            echo "ERROR_INVALID_PATH: $file"
+            exit 1
+            ;;
+        esac
+
+        {% if check_file_usage | bool %}
+        if ! command -v fuser >/dev/null 2>&1; then
+          echo "SKIPPED_FUSER_UNAVAILABLE: $file"
+          exit 0
+        fi
+
+        if fuser "$file" >/dev/null 2>&1; then
+          echo "SKIPPED_IN_USE: $file"
+          exit 0
+        fi
+        {% endif %}
+
+        gzip -- "$file"
+        echo "COMPRESSED: $file"
+      args:
+        executable: /bin/bash
+      loop: "{{ housekeeping_compress_candidates }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: compress_results
+      changed_when: "'COMPRESSED:' in compress_result.stdout"
+      failed_when: compress_result.rc != 0
+      loop_var: item
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+        - housekeeping_compress_candidates | length > 0
+
+    - name: Remove eligible old files
+      ansible.builtin.shell: |
+        set -eu
+        file={{ item.path | quote }}
+
+        [ -f "$file" ] || {
+          echo "SKIPPED_MISSING: $file"
+          exit 0
+        }
+
+        [ ! -L "$file" ] || {
+          echo "SKIPPED_SYMLINK: $file"
+          exit 0
+        }
+
+        case "$file" in
+          /opt/*) ;;
+          *)
+            echo "ERROR_INVALID_PATH: $file"
+            exit 1
+            ;;
+        esac
+
+        case "$file" in
+          /opt/nbu/*|/opt/NBU82/*|/opt/nbu|/opt/NBU82)
+            echo "SKIPPED_NETBACKUP: $file"
+            exit 0
+            ;;
+        esac
+
+        {% if check_file_usage | bool %}
+        if ! command -v fuser >/dev/null 2>&1; then
+          echo "SKIPPED_FUSER_UNAVAILABLE: $file"
+          exit 0
+        fi
+
+        if fuser "$file" >/dev/null 2>&1; then
+          echo "SKIPPED_IN_USE: $file"
+          exit 0
+        fi
+        {% endif %}
+
+        rm -- "$file"
+        echo "DELETED: $file"
+      args:
+        executable: /bin/bash
+      loop: "{{ housekeeping_candidates }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: delete_results
+      changed_when: "'DELETED:' in delete_result.stdout"
+      failed_when: delete_result.rc != 0
+      loop_var: item
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+        - housekeeping_candidates | length > 0
+
+    - name: Log compression and deletion outcomes
+      ansible.builtin.shell: |
+        {% for r in compress_results.results | default([]) %}
+        printf '%s host=%s action=compress rc=%s output=%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          {{ ansible_hostname | quote }} \
+          {{ r.rc | default(0) | string | quote }} \
+          {{ r.stdout | default('no output') | replace('\n', ' ') | quote }} \
+          >> {{ log_file | quote }}
+        {% endfor %}
+        {% for r in delete_results.results | default([]) %}
+        printf '%s host=%s action=delete rc=%s output=%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          {{ ansible_hostname | quote }} \
+          {{ r.rc | default(0) | string | quote }} \
+          {{ r.stdout | default('no output') | replace('\n', ' ') | quote }} \
+          >> {{ log_file | quote }}
+        {% endfor %}
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+
+    - name: Get final filesystem usage
+      ansible.builtin.command:
+        argv:
+          - df
+          - -P
+          - "{{ target_fs }}"
+      register: df_after
+      changed_when: false
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+
+    - name: Set final filesystem usage percentage
+      ansible.builtin.set_fact:
+        usage_after: >-
+          {{
+            df_after.stdout_lines[1].split()[4]
+            | regex_replace('%', '')
+            | int
+          }}
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+
+    - name: Determine final housekeeping status
+      ansible.builtin.set_fact:
+        housekeeping_status: >-
+          {{
+            'STILL_HIGH'
+            if usage_after | int > threshold
+            else 'HOUSEKEEPING_PERFORMED'
+          }}
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+
+    - name: Log final filesystem usage and status
+      ansible.builtin.shell: |
+        printf '%s host=%s usage_before=%s%% usage_after=%s%% threshold=%s%% result=%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          {{ ansible_hostname | quote }} \
+          {{ usage_before | string | quote }} \
+          {{ usage_after | string | quote }} \
+          {{ threshold | string | quote }} \
+          {{ housekeeping_status | quote }} \
+          >> {{ log_file | quote }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+
+    - name: Report final result
       ansible.builtin.debug:
         msg:
           - "Filesystem: {{ target_fs }}"
           - "Usage before: {{ usage_before }}%"
+          - "Usage after: {{ usage_after }}%"
           - "Threshold: {{ threshold }}%"
-          - "Housekeeping required: {{ (usage_before | int) > (threshold | int) }}"
+          - "Result: {{ housekeeping_status }}"
+          - "Candidate report: {{ find_file_list }}"
+          - "Execution log: {{ log_file }}"
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
 
-    - name: Log initial filesystem usage
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        line: >-
-          {{ ansible_date_time.iso8601 }}
-          host={{ inventory_hostname }}
-          filesystem={{ target_fs }}
-          usage_before={{ usage_before }}%
-          threshold={{ threshold }}%
-        insertafter: EOF
-
-    
-    - name: Skip housekeeping when usage is within threshold
-      ansible.builtin.set_fact:
-        housekeeping_status: "NOT_REQUIRED"
-      when: (usage_before | int) <= (threshold | int)
-
-    - name: Report housekeeping not required
+    - name: Report that housekeeping is not required
       ansible.builtin.debug:
         msg: >-
-          EXIT 0 - Housekeeping not required.
-          Current usage={{ usage_before }}%,
-          threshold={{ threshold }}%.
-      when: (usage_before | int) <= (threshold | int)
-
-
-    - name: Discover eligible files and directories
-      when: (usage_before | int) > (threshold | int)
-      block:
-
-        - name: Find old Patrol log files
-          ansible.builtin.find:
-            paths:
-              - "{{ patrol_dir }}/PATROL/log"
-              - "{{ patrol_dir }}/PATROL/log/history/{{ ansible_hostname }}/3300"
-              - "{{ patrol_dir }}/PATROL/log/history/{{ ansible_hostname }}/3399"
-            recurse: false
-            hidden: true
-            file_type: file
-            age: "{{ patrol_age_days }}d"
-            age_stamp: mtime
-            patterns:
-              - "*.err5.*"
-              - "*.audit.*"
-              - "*.PEM.*"
-              - "param.hist.*"
-              - "dir.*"
-              - "annotate.dat.*"
-            use_regex: false
-            follow: false
-          register: patrol_files
-          failed_when: false
-
-        - name: Find IBM WAS server log directories
-          ansible.builtin.find:
-            paths: "{{ was_dir }}/wlp/usr/servers"
-            recurse: true
-            file_type: directory
-            patterns: "logs"
-            use_regex: false
-            follow: false
-          register: was_log_dirs
-          failed_when: false
-
-        - name: Find old archived WAS logs
-          ansible.builtin.find:
-            paths: "{{ item.path }}"
-            recurse: false
-            file_type: file
-            age: "{{ was_archive_age_days }}d"
-            age_stamp: mtime
-            patterns:
-              - "*.zip"
-              - "*.gz"
-              - "*.bz2"
-            use_regex: false
-            follow: false
-          loop: "{{ was_log_dirs.files | default([]) }}"
-          loop_control:
-            label: "{{ item.path }}"
-          register: was_archives
-          failed_when: false
-
-        - name: Find old WAS logs eligible for compression
-          ansible.builtin.find:
-            paths: "{{ item.path }}"
-            recurse: false
-            file_type: file
-            age: "{{ was_compress_age_days }}d"
-            age_stamp: mtime
-            patterns:
-              - "messages_*.log"
-              - "messages_*.log.*"
-              - "console_*.log"
-              - "console_*.log.*"
-            excludes:
-              - "*.zip"
-              - "*.gz"
-              - "*.bz2"
-            use_regex: false
-            follow: false
-          loop: "{{ was_log_dirs.files | default([]) }}"
-          loop_control:
-            label: "{{ item.path }}"
-          register: was_compress_candidates
-          failed_when: false
-
-        - name: Find old Control-M process logs
-          ansible.builtin.find:
-            paths: "{{ controlm_dir }}"
-            recurse: true
-            depth: 4
-            file_type: file
-            age: "{{ controlm_age_days }}d"
-            age_stamp: mtime
-            patterns: "*"
-            use_regex: false
-            follow: false
-          register: controlm_files
-          failed_when: false
-
-        - name: Discover VCS debug directories
-          ansible.builtin.find:
-            paths: "{{ target_fs }}"
-            recurse: false
-            file_type: directory
-            patterns:
-              - "VRTSvxvm"
-              - "VRTSaslapm"
-            use_regex: false
-            follow: false
-          register: vcs_dirs
-          failed_when: false
-
-        - name: Find old VCS debug information
-          ansible.builtin.find:
-            paths: "{{ item.path }}/debuginfo"
-            recurse: true
-            file_type: file
-            age: "{{ vcs_debug_age_days }}d"
-            age_stamp: mtime
-            patterns: "*"
-            use_regex: false
-            follow: false
-          loop: "{{ vcs_dirs.files | default([]) }}"
-          loop_control:
-            label: "{{ item.path }}"
-          register: vcs_files
-          failed_when: false
-
-        - name: Discover NetBackup directories
-          ansible.builtin.find:
-            paths: "{{ target_fs }}"
-            recurse: false
-            file_type: directory
-            patterns:
-              - "nbu"
-              - "NBU82"
-            use_regex: false
-            follow: false
-          register: netbackup_dirs
-          failed_when: false
-
-        - name: Build housekeeping candidate list
-          ansible.builtin.set_fact:
-            housekeeping_candidates: >-
-              {{
-                (patrol_files.files | default([]))
-                + (
-                    was_archives.results
-                    | default([])
-                    | map(attribute='files')
-                    | flatten
-                  )
-                + (
-                    controlm_files.files
-                    | default([])
-                  )
-                + (
-                    vcs_files.results
-                    | default([])
-                    | map(attribute='files')
-                    | flatten
-                  )
-              }}
-
-        - name: Build WAS compression candidate list
-          ansible.builtin.set_fact:
-            housekeeping_compress_candidates: >-
-              {{
-                was_compress_candidates.results
-                | default([])
-                | map(attribute='files')
-                | flatten
-              }}
-
-        - name: Write candidate list to the review file
-          ansible.builtin.copy:
-            dest: "{{ find_file_list }}"
-            owner: root
-            group: root
-            mode: "0600"
-            content: |
-              Filesystem: {{ target_fs }}
-              Usage before: {{ usage_before }}%
-              Threshold: {{ threshold }}%
-
-              Deletion candidates:
-              {% for item in housekeeping_candidates %}
-              {{ item.path }}
-              {% endfor %}
-
-              Compression candidates:
-              {% for item in housekeeping_compress_candidates %}
-              {{ item.path }}
-              {% endfor %}
-
-              NetBackup directories (not deleted by default):
-              {% for item in netbackup_dirs.files | default([]) %}
-              {{ item.path }}
-              {% endfor %}
-
-        - name: Log discovery totals
-          ansible.builtin.lineinfile:
-            path: "{{ log_file }}"
-            line: >-
-              {{ ansible_date_time.iso8601 }}
-              host={{ inventory_hostname }}
-              deletion_candidates={{ housekeeping_candidates | length }}
-              compression_candidates={{ housekeeping_compress_candidates | length }}
-            insertafter: EOF
-
-        - name: Display discovered candidates
-          ansible.builtin.debug:
-            msg:
-              - "Deletion candidates: {{ housekeeping_candidates | length }}"
-              - "Compression candidates: {{ housekeeping_compress_candidates | length }}"
-              - "Review file: {{ find_file_list }}"
-
-        - name: Stop before modifying files when housekeeping is disabled
-          ansible.builtin.set_fact:
-            housekeeping_status: "DRY_RUN"
-          when: not housekeeping_enabled
-
-        - name: Log dry-run result
-          ansible.builtin.lineinfile:
-            path: "{{ log_file }}"
-            line: >-
-              {{ ansible_date_time.iso8601 }}
-              host={{ inventory_hostname }}
-              result=DRY_RUN
-              reason=housekeeping_enabled_false
-            insertafter: EOF
-          when: not housekeeping_enabled
-
-        - name: Perform approved housekeeping
-          when: housekeeping_enabled
-          block:
-
-            - name: Remove unused eligible files
-              ansible.builtin.shell: |
-                set -eu
-                file={{ item.path | quote }}
-
-                # Do not follow symlinks or delete files outside /opt.
-                [ -f "$file" ] || exit 0
-                [ ! -L "$file" ] || exit 0
-                case "$file" in
-                  /opt/*) ;;
-                  *) exit 1 ;;
-                esac
-
-                # Refuse deletion if any process is using the file.
-                if command -v fuser >/dev/null 2>&1; then
-                  if fuser "$file" >/dev/null 2>&1; then
-                    echo "SKIPPED_IN_USE: $file"
-                    exit 0
-                  fi
-                elif [ "{{ check_file_usage | bool }}" = "True" ]; then
-                  echo "SKIPPED_NO_FUSER: $file"
-                  exit 0
-                fi
-
-                rm -- "$file"
-                echo "DELETED: $file"
-              args:
-                executable: /bin/bash
-              loop: "{{ housekeeping_candidates }}"
-              loop_control:
-                label: "{{ item.path }}"
-              register: delete_results
-              changed_when: "'DELETED:' in stdout"
-              failed_when: false
-
-            - name: Compress eligible WAS logs
-              ansible.builtin.shell: |
-                set -eu
-                file={{ item.path | quote }}
-                # Skip files that no longer exist
-                [ -f "$file" ] || {
-                  echo "SKIPPED_MISSING: $file"
-                  exit 0
-                }
-                # Do not follow symbolic links
-                [ ! -L "$file" ] || {
-                  echo "SKIPPED_SYMLINK: $file"
-                  exit 0
-                }
-                # Restrict compression to approved WAS paths
-                case "$file" in
-                   /opt/IBM/*) ;;
-                   *)
-                     echo "ERROR_INVALID_PATH: $file"
-                     exit 1
-                     ;;
-                esac
-                # Do not compress files currently in use
-                if command -v fuser >/dev/null 2>&1 &&
-                   fuser "$file" >/dev/null 2>&1; then
-                  echo "SKIPPED_IN_USE: $file"
-                  exit 0
-                fi
-                # Compress the file
-                gzip -- "$file"
-                echo "COMPRESSED: $file"
-              args:
-                executable: /bin/bash
-              loop: "{{ housekeeping_compress_candidates }}"
-              loop_control:
-                label: "{{ item.path }}"
-              register: compress_results
-              changed_when: "'COMPRESSED:' in compress_results.stdout"
-              failed_when: compress_results.rc != 0
-
-            - name: Record cleanup action results
-              ansible.builtin.lineinfile:
-                path: "{{ log_file }}"
-                line: >-
-                  {{ ansible_date_time.iso8601 }}
-                  host={{ inventory_hostname }}
-                  action={{ item }}
-                insertafter: EOF
-              loop: >-
-                {{
-                  (
-                    delete_results.results | default([])
-                    | map(attribute='stdout') | list
-                  )
-                  +
-                  (
-                    compress_results.results | default([])
-                    | map(attribute='stdout') | list
-                  )
-                }}
-              when: item | length > 0
-
-            - name: Recheck /opt filesystem usage
-              ansible.builtin.command:
-                argv:
-                  - df
-                  - -P
-                  - "{{ target_fs }}"
-              register: opt_df_after
-              changed_when: false
-
-            - name: Set final filesystem usage
-              ansible.builtin.set_fact:
-                usage_after: >-
-                  {{
-                    opt_df_after.stdout_lines[1].split()[-2]
-                    | regex_replace('%', '')
-                    | int
-                  }}
-
-            - name: Set final housekeeping status
-              ansible.builtin.set_fact:
-                housekeeping_status: >-
-                  {{
-                    'STILL_HIGH'
-                    if (usage_after | int) > (threshold | int)
-                    else 'HOUSEKEEPING_PERFORMED'
-                  }}
-
-            - name: Log final housekeeping result
-              ansible.builtin.lineinfile:
-                path: "{{ log_file }}"
-                line: >-
-                  {{ ansible_date_time.iso8601 }}
-                  host={{ inventory_hostname }}
-                  usage_before={{ usage_before }}%
-                  usage_after={{ usage_after }}%
-                  threshold={{ threshold }}%
-                  result={{ housekeeping_status }}
-                insertafter: EOF
-
-            - name: Report final housekeeping result
-              ansible.builtin.debug:
-                msg:
-                  - "Status: {{ housekeeping_status }}"
-                  - "Usage before: {{ usage_before }}%"
-                  - "Usage after: {{ usage_after }}%"
-                  - "Threshold: {{ threshold }}%"
-                  - "Review log: {{ log_file }}"
-
-      rescue:
-        - name: Log discovery or housekeeping failure
-          ansible.builtin.lineinfile:
-            path: "{{ log_file }}"
-            line: >-
-              {{ ansible_date_time.iso8601 }}
-              host={{ inventory_hostname }}
-              result=HOUSEKEEPING_ERROR
-              message={{ ansible_failed_result.msg | default('See Ansible task output') | quote }}
-            insertafter: EOF
-
-        - name: Mark housekeeping as failed
-          ansible.builtin.set_fact:
-            housekeeping_status: "ERROR"
-
-        - name: Stop after housekeeping failure
-          ansible.builtin.fail:
-            msg: >-
-              Housekeeping failed. Review {{ log_file }}
-              and the Ansible task output before retrying.
+          {{ target_fs }} usage is {{ usage_before }}%, which does not exceed
+          the {{ threshold }}% threshold. No housekeeping was performed.
+      when: usage_before | int <= threshold
