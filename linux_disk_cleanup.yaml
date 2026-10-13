@@ -346,15 +346,15 @@
         set -eu
         file={{ item.path | quote }}
 
-        [ -f "$file" ] || {
+        if [ ! -f "$file" ]; then
           echo "SKIPPED_MISSING: $file"
           exit 0
-        }
+        fi
 
-        [ ! -L "$file" ] || {
+        if [ -L "$file" ]; then
           echo "SKIPPED_SYMLINK: $file"
           exit 0
-        }
+        fi
 
         case "$file" in
           /opt/IBM/*) ;;
@@ -376,8 +376,24 @@
         fi
         {% endif %}
 
-        gzip -- "$file"
-        echo "COMPRESSED: $file"
+        if ! command -v timeout >/dev/null 2>&1; then
+          echo "ERROR: timeout command is unavailable"
+          exit 1
+        fi
+
+        echo "START_COMPRESS: $file"
+
+        if timeout 300 gzip -- "$file"; then
+          echo "COMPRESSED: $file"
+        else
+          rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "ERROR_TIMEOUT: $file"
+          else
+            echo "ERROR_COMPRESS: $file (rc=$rc)"
+          fi
+          exit "$rc"
+        fi
       args:
         executable: /bin/bash
       loop: "{{ housekeeping_compress_candidates }}"
