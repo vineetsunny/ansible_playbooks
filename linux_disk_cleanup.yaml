@@ -383,7 +383,7 @@
 
         echo "START_COMPRESS: $file"
 
-        if timeout 300 gzip -- "$file"; then
+        if timeout 300 gzip -f -- "$file"; then
           echo "COMPRESSED: $file"
         else
           rc=$?
