@@ -396,28 +396,21 @@
         set -eu
         file={{ item.path | quote }}
 
-        [ -f "$file" ] || {
+        if [ ! -f "$file" ]; then
           echo "SKIPPED_MISSING: $file"
           exit 0
-        }
+        fi
 
-        [ ! -L "$file" ] || {
+        if [ -L "$file" ]; then
           echo "SKIPPED_SYMLINK: $file"
           exit 0
-        }
+        fi
 
         case "$file" in
-          /opt/*) ;;
+          /opt/patrol/PATROL/log/*|/opt/controlm/*|/opt/IBM/*|/opt/VRTSvxvm/*|/opt/VRTSaslapm/*) ;;
           *)
             echo "ERROR_INVALID_PATH: $file"
             exit 1
-            ;;
-        esac
-
-        case "$file" in
-          /opt/nbu/*|/opt/NBU82/*|/opt/nbu|/opt/NBU82)
-            echo "SKIPPED_NETBACKUP: $file"
-            exit 0
             ;;
         esac
 
@@ -441,13 +434,27 @@
       loop_control:
         label: "{{ item.path }}"
       register: delete_results
-      changed_when: "'DELETED:' in delete_result.stdout"
-      failed_when: delete_result.rc != 0
+      changed_when: "'DELETED:' in stdout"
+      failed_when: rc != 0
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
         - housekeeping_candidates | length > 0
-
+    
+    - name: Log individual deletion results
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        create: true
+        mode: "0640"
+        insertafter: EOF
+        line: "{{ ansible_date_time.iso8601 }} host={{ ansible_hostname }} {{ item.stdout | default('NO_OUTPUT') | replace('\n', ' ') }}"
+      loop: "{{ delete_results.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.path | default('unknown') }}"
+       when:
+         - housekeeping_enabled | bool
+         - delete_results.results is defined
+         
     - name: Log compression and deletion outcomes
       ansible.builtin.shell: |
         echo "Housekeeping actions completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ log_file | quote }}
