@@ -405,20 +405,31 @@
               ansible.builtin.shell: |
                 set -eu
                 file={{ item.path | quote }}
-
-                [ -f "$file" ] || exit 0
-                [ ! -L "$file" ] || exit 0
+                # Skip files that no longer exist
+                [ -f "$file" ] || {
+                  echo "SKIPPED_MISSING: $file"
+                  exit 0
+                }
+                # Do not follow symbolic links
+                [ ! -L "$file" ] || {
+                  echo "SKIPPED_SYMLINK: $file"
+                  exit 0
+                }
+                # Restrict compression to approved WAS paths
                 case "$file" in
-                  /opt/IBM/*) ;;
-                  *) exit 1 ;;
+                   /opt/IBM/*) ;;
+                   *)
+                     echo "ERROR_INVALID_PATH: $file"
+                     exit 1
+                     ;;
                 esac
-
+                # Do not compress files currently in use
                 if command -v fuser >/dev/null 2>&1 &&
                    fuser "$file" >/dev/null 2>&1; then
                   echo "SKIPPED_IN_USE: $file"
                   exit 0
                 fi
-
+                # Compress the file
                 gzip -- "$file"
                 echo "COMPRESSED: $file"
               args:
@@ -427,8 +438,8 @@
               loop_control:
                 label: "{{ item.path }}"
               register: compress_results
-              changed_when: "'COMPRESSED:' in stdout"
-              failed_when: false
+              changed_when: "'COMPRESSED:' in compress_results.stdout"
+              failed_when: compress_results.rc != 0
 
             - name: Record cleanup action results
               ansible.builtin.lineinfile:
