@@ -384,8 +384,8 @@
       loop_control:
         label: "{{ item.path }}"
       register: compress_results
-      changed_when: "'COMPRESSED:' in compress_result.stdout"
-      failed_when: compress_result.rc != 0
+      changed_when: "'COMPRESSED:' in stdout"
+      failed_when: rc != 0
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
