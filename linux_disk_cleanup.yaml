@@ -451,7 +451,7 @@
       loop: "{{ delete_results.results | default([]) }}"
       loop_control:
         label: "{{ item.item.path | default('unknown') }}"
-       when:
+      when:
          - housekeeping_enabled | bool
          - delete_results.results is defined
          
