@@ -380,10 +380,17 @@
           echo "ERROR: timeout command is unavailable"
           exit 1
         fi
+        
+        archive="${file}.gz"
+        
+        if [ -e "$archive" ]; then
+          echo "SKIPPED_ARCHIVE_EXISTS: $archive"
+          exit 0
+        fi
 
         echo "START_COMPRESS: $file"
 
-        if timeout 300 gzip -f -- "$file"; then
+        if timeout 300 gzip -- "$file" </dev/null; then
           echo "COMPRESSED: $file"
         else
           rc=$?
