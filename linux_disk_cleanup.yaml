@@ -434,13 +434,13 @@
       loop_control:
         label: "{{ item.path }}"
       register: delete_results
-      changed_when: "'DELETED:' in stdout"
-      failed_when: rc != 0
+      changed_when: "'DELETED:' in (stdout | default(''))"
+      failed_when: (rc | default(0) | int) != 0
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
         - housekeeping_candidates | length > 0
-    
+
     - name: Log individual deletion results
       ansible.builtin.lineinfile:
         path: "{{ log_file }}"
