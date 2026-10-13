@@ -450,28 +450,15 @@
 
     - name: Log compression and deletion outcomes
       ansible.builtin.shell: |
-        {% for r in compress_results.results | default([]) %}
-        printf '%s host=%s action=compress rc=%s output=%s\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          {{ ansible_hostname | quote }} \
-          {{ r.rc | default(0) | string | quote }} \
-          {{ r.stdout | default('no output') | replace('\n', ' ') | quote }} \
-          >> {{ log_file | quote }}
-        {% endfor %}
-        {% for r in delete_results.results | default([]) %}
-        printf '%s host=%s action=delete rc=%s output=%s\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          {{ ansible_hostname | quote }} \
-          {{ r.rc | default(0) | string | quote }} \
-          {{ r.stdout | default('no output') | replace('\n', ' ') | quote }} \
-          >> {{ log_file | quote }}
-        {% endfor %}
+        echo "Housekeeping actions completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ log_file | quote }}
       args:
         executable: /bin/bash
-      changed_when: true
+      changed_when: false
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
+        - (compress_results.results | default([]) | length > 0) or
+          (delete_results.results | default([]) | length > 0)
 
     - name: Get final filesystem usage
       ansible.builtin.command:
