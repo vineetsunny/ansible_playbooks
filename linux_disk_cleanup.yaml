@@ -386,7 +386,6 @@
       register: compress_results
       changed_when: "'COMPRESSED:' in compress_result.stdout"
       failed_when: compress_result.rc != 0
-      loop_var: item
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
@@ -444,7 +443,6 @@
       register: delete_results
       changed_when: "'DELETED:' in delete_result.stdout"
       failed_when: delete_result.rc != 0
-      loop_var: item
       when:
         - usage_before | int > threshold
         - housekeeping_enabled | bool
