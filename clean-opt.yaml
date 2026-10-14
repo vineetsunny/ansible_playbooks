@@ -8,7 +8,7 @@
     target_fs: "/opt"
     threshold: 75
 
-    log_file: "/var/log/dc-tanium-housekeeping-psd-task.log"
+    log_file: "/var/log/housekeeping-psd-task.log"
     find_file_list: "/var/tmp/findfiles.txt"
 
     # Set false for discovery/reporting only.
