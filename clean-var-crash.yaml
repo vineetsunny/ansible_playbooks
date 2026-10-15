@@ -153,9 +153,9 @@
       loop: "{{ deleted_files }}"
       when: deleted_files | length > 0
 
-    - name: Wait 30 seconds for filesystem usage to stabilize
+    - name: Wait 15 seconds for filesystem usage to stabilize
       ansible.builtin.pause:
-        seconds: 30
+        seconds: 15
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
