@@ -1,0 +1,246 @@
+---
+- name: Clean-var-log housekeeping
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    housekeeping_dir: /var/log
+    filesystem_path: /var
+    housekeeping_threshold: 65
+    supported_regions:
+      - GB
+      - UK
+      - US
+
+    housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
+    housekeeping_tag: Tanium-Housekeeping-PSD-Task-VAR-LOG
+
+    # Exit codes
+    # 0  - Housekeeping Not Required
+    # 1  - Housekeeping Performed
+    # 2  - Usage Still High After Housekeeping
+    # 3  - No Files Found With Criteria
+    # 21 - Directory Not Present
+    # 22 - File System Not Mounted
+    # 23 - Region Not Supported
+
+  tasks:
+
+    - name: Initialize housekeeping result
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 0
+        housekeeping_result: ""
+        housekeeping_files: []
+
+    - name: Check whether the server region is supported
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 23
+        housekeeping_result: "UNSUPPORTED_REGION - Server region is not supported"
+      when: (server_region | default('UNKNOWN') | upper) not in supported_regions
+
+    - name: Stop processing for unsupported regions
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 23
+
+    - name: Check whether /var/log directory exists
+      ansible.builtin.stat:
+        path: "{{ housekeeping_dir }}"
+      register: var_log_stat
+
+    - name: Report missing /var/log directory
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 21
+        housekeeping_result: "DIRECTORY_NOT_PRESENT - /var/log does not exist"
+      when: not var_log_stat.stat.exists or
+            not var_log_stat.stat.isdir
+
+    - name: Stop processing when directory is missing
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 21
+
+    - name: Check filesystem containing /var/log
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - -n
+          - -o
+          - TARGET
+          - --target
+          - "{{ filesystem_path }}"
+      register: var_mount
+      changed_when: false
+      failed_when: false
+
+    - name: Check filesystem mount status
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 22
+        housekeeping_result: "FILESYSTEM_NOT_MOUNTED - /var is not mounted"
+      when: var_mount.rc != 0 or (var_mount.stdout | trim | length == 0)
+
+    - name: Stop processing when filesystem is not mounted
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 22
+
+    - name: Get filesystem utilization before housekeeping
+      ansible.builtin.shell: |
+        df -P "{{ filesystem_path }}" |
+        awk 'NR == 2 {gsub(/%/, "", $5); print $5}'
+      args:
+        executable: /bin/bash
+      register: usage_before
+      changed_when: false
+
+    - name: Record initial filesystem utilization
+      ansible.builtin.set_fact:
+        usage_before_pct: "{{ usage_before.stdout | trim | int }}"
+
+    - name: Skip housekeeping when usage is within threshold
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 0
+        housekeeping_result: "HOUSEKEEPING_NOT_REQUIRED - Usage is within threshold"
+      when: usage_before_pct | int <= housekeeping_threshold
+
+    - name: Stop when housekeeping is not required
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 0
+
+    - name: Find eligible rotated system log files
+      ansible.builtin.find:
+        paths: "{{ housekeeping_dir }}"
+        recurse: false
+        file_type: file
+        age: 2d
+        age_stamp: mtime
+        size: 50000
+        patterns:
+          - "messages-*"
+          - "auth.log-*"
+          - "secure-*"
+          - "wtmp-*"
+          - "messages.*"
+          - "auth.log.*"
+          - "secure.*"
+          - "wtmp.*"
+        use_regex: false
+      register: rotated_logs
+
+    - name: Find eligible system activity files
+      ansible.builtin.find:
+        paths: "{{ housekeeping_dir }}/sa"
+        recurse: false
+        file_type: file
+        age: 3d
+        age_stamp: mtime
+        size: 50000
+        patterns:
+          - "sa*"
+        use_regex: false
+      register: sa_logs
+      failed_when: false
+
+    - name: Combine eligible files
+      ansible.builtin.set_fact:
+        housekeeping_files: >-
+          {{
+            (rotated_logs.files | default([])) +
+            (sa_logs.files | default([]))
+          }}
+
+    - name: Report when no eligible files are found
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 3
+        housekeeping_result: "NO_FILES_FOUND - No eligible files found; PSD attention required"
+      when: housekeeping_files | length == 0
+
+    - name: Log no eligible files
+      ansible.builtin.lineinfile:
+        path: "{{ housekeeping_log }}"
+        create: true
+        mode: "0640"
+        owner: root
+        group: root
+        line: >-
+          {{ ansible_date_time.date | default('') }}
+          {{ housekeeping_tag }}
+          Disk Usage: {{ usage_before_pct }}%,
+          Result: {{ housekeeping_result }}
+      when: housekeeping_exit_code == 3
+
+    - name: Stop when no eligible files are found
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 3
+
+    - name: Compress eligible log files
+      ansible.builtin.command:
+        argv:
+          - gzip
+          - --
+          - "{{ item.path }}"
+      loop: "{{ housekeeping_files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: compression_result
+      when: housekeeping_files | length > 0
+
+    - name: Get filesystem utilization after housekeeping
+      ansible.builtin.shell: |
+        df -P "{{ filesystem_path }}" |
+        awk 'NR == 2 {gsub(/%/, "", $5); print $5}'
+      args:
+        executable: /bin/bash
+      register: usage_after
+      changed_when: false
+
+    - name: Record final filesystem utilization
+      ansible.builtin.set_fact:
+        usage_after_pct: "{{ usage_after.stdout | trim | int }}"
+
+    - name: Determine housekeeping outcome
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: >-
+          {{
+            2 if (usage_after_pct | int > housekeeping_threshold)
+            else 1
+          }}
+        housekeeping_result: >-
+          {{
+            'NO_SUCCESS - Needs PSD Attention'
+            if (usage_after_pct | int > housekeeping_threshold)
+            else 'SUCCESS - Housekeeping Performed'
+          }}
+
+    - name: Log housekeeping details
+      ansible.builtin.shell: |
+        {
+          echo "Files Processed - {{ ansible_date_time.date | default('') }}"
+          echo "========================================"
+          {% for file in housekeeping_files %}
+          echo "{{ file.path }} -> {{ file.path }}.gz"
+          {% endfor %}
+          echo "========================================"
+          echo "{{ housekeeping_tag }}: Usage Before: {{ usage_before_pct }}%, Usage After: {{ usage_after_pct }}%, Result: {{ housekeeping_result }}, Exit Code: {{ housekeeping_exit_code }}"
+        } >> "{{ housekeeping_log }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Display final housekeeping result
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem: {{ filesystem_path }}"
+          - "Usage before housekeeping: {{ usage_before_pct }}%"
+          - "Usage after housekeeping: {{ usage_after_pct }}%"
+          - "Files processed: {{ housekeeping_files | length }}"
+          - "Result: {{ housekeeping_result }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
+
+    - name: Return housekeeping outcome
+      ansible.builtin.fail:
+        msg: >-
+          {{ housekeeping_result }}.
+          Usage before={{ usage_before_pct }}%,
+          usage after={{ usage_after_pct }}%,
+          exit code={{ housekeeping_exit_code }}.
+      when: housekeeping_exit_code == 2
+
