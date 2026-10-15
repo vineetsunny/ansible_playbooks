@@ -15,7 +15,7 @@
 
     # Safety: report eligible files without deleting them by default.
     # Set to true only after reviewing the candidate files.
-    housekeeping_delete: false
+    housekeeping_delete: true
 
   tasks:
     - name: Validate target directory
