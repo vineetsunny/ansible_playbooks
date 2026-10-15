@@ -196,7 +196,13 @@
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
-
+    - name: Debug actual post-cleanup utilization
+      ansible.builtin.debug:
+        msg:
+          - "BEFORE={{ housekeeping_usage_before.stdout | trim }}%"
+          - "AFTER_RAW={{ housekeeping_usage_after.stdout | to_json }}"
+          - "AFTER_INT={{ housekeeping_usage_after.stdout | trim | int }}%"
+          - "THRESHOLD={{ housekeeping_threshold }}%"
     - name: Validate post-cleanup utilization
       ansible.builtin.assert:
         that:
