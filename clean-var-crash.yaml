@@ -13,8 +13,6 @@
     housekeeping_file_age: 3d
     housekeeping_logfile: /var/log/housekeeping-psd-task.log
 
-    # Safety: report eligible files without deleting them by default.
-    # Set to true only after reviewing the candidate files.
     housekeeping_delete: true
 
   tasks:
@@ -23,16 +21,16 @@
         path: "{{ housekeeping_directory }}"
       register: housekeeping_dir_stat
 
-    - name: Stop if target directory is missing
+    - name: Stop if target directory is missing or invalid
       ansible.builtin.fail:
         msg: >-
           EXIT_CODE=21 - Directory {{ housekeeping_directory }}
-          is not present.
-      when:
-        - not housekeeping_dir_stat.stat.exists
-        - not housekeeping_dir_stat.stat.isdir | default(false)
+          is missing or is not a directory.
+      when: >-
+        not housekeeping_dir_stat.stat.exists or
+        not (housekeeping_dir_stat.stat.isdir | default(false))
 
-    - name: Check whether the expected /var filesystem is mounted
+    - name: Check whether the expected filesystem is mounted
       ansible.builtin.command:
         argv:
           - findmnt
@@ -57,9 +55,8 @@
         housekeeping_mount.rc != 0 or
         housekeeping_mount.stdout | trim != housekeeping_mountpoint
 
-    - name: Read current filesystem utilization
+    - name: Read filesystem utilization before cleanup
       ansible.builtin.shell: |
-        set -o pipefail
         df -P "{{ housekeeping_directory }}" |
           awk 'NR == 2 {
             gsub(/%/, "", $5);
@@ -70,22 +67,21 @@
       register: housekeeping_usage_before
       changed_when: false
 
-    - name: Validate filesystem utilization value
+    - name: Validate pre-cleanup utilization
       ansible.builtin.assert:
         that:
           - housekeeping_usage_before.stdout | trim is match('^[0-9]+$')
-        fail_msg: "Unable to determine filesystem utilization."
+        fail_msg: "Unable to determine filesystem utilization before cleanup."
 
     - name: Report that housekeeping is not required
       ansible.builtin.debug:
         msg: >-
           EXIT_CODE=0 - Housekeeping not required.
-          Filesystem utilization is
-          {{ housekeeping_usage_before.stdout | trim }}%,
-          at or below the {{ housekeeping_threshold }}% threshold.
+          Utilization={{ housekeeping_usage_before.stdout | trim }}%.
+          Threshold={{ housekeeping_threshold }}%.
       when: >-
-        housekeeping_usage_before.stdout | int
-        <= housekeeping_threshold
+        (housekeeping_usage_before.stdout | int)
+        <= (housekeeping_threshold | int)
 
     - name: Identify eligible core dump files
       ansible.builtin.find:
@@ -99,22 +95,23 @@
         hidden: true
       register: housekeeping_candidates
       when: >-
-        housekeeping_usage_before.stdout | int
-        > housekeeping_threshold
+        (housekeeping_usage_before.stdout | int)
+        > (housekeeping_threshold | int)
 
     - name: Report eligible files
       ansible.builtin.debug:
         msg:
           - "Filesystem utilization before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
+          - "Threshold: {{ housekeeping_threshold }}%"
           - "Eligible files found: {{ housekeeping_candidates.matched }}"
           - "Deletion enabled: {{ housekeeping_delete }}"
           - "Eligible file paths:"
           - "{{ housekeeping_candidates.files | map(attribute='path') | list }}"
       when: >-
-        housekeeping_usage_before.stdout | int
-        > housekeeping_threshold
+        (housekeeping_usage_before.stdout | int)
+        > (housekeeping_threshold | int)
 
-    - name: Create housekeeping log directory and file
+    - name: Create housekeeping log file
       ansible.builtin.file:
         path: "{{ housekeeping_logfile }}"
         state: touch
@@ -122,10 +119,10 @@
         group: root
         mode: "0640"
       when: >-
-        housekeeping_usage_before.stdout | int
-        > housekeeping_threshold
+        (housekeeping_usage_before.stdout | int)
+        > (housekeeping_threshold | int)
 
-    - name: Log the housekeeping assessment
+    - name: Log housekeeping assessment
       ansible.builtin.shell: |
         printf '%s\n' \
           "{{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }} | HOST={{ inventory_hostname }} | USAGE_BEFORE={{ housekeeping_usage_before.stdout | trim }}% | THRESHOLD={{ housekeeping_threshold }}% | CANDIDATES={{ housekeeping_candidates.matched }} | DELETE_ENABLED={{ housekeeping_delete }}" \
@@ -134,8 +131,8 @@
         executable: /bin/bash
       changed_when: false
       when: >-
-        housekeeping_usage_before.stdout | int
-        > housekeeping_threshold
+        (housekeeping_usage_before.stdout | int)
+        > (housekeeping_threshold | int)
 
     - name: Stop when no eligible files are found
       ansible.builtin.fail:
@@ -144,20 +141,18 @@
           {{ housekeeping_file_pattern }} older than
           {{ housekeeping_file_age }} were found in
           {{ housekeeping_directory }}.
-          PSD/operations investigation is required.
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_candidates.matched | int == 0
 
     - name: Report that deletion is disabled
       ansible.builtin.debug:
         msg: >-
           REPORT_ONLY - No files were deleted.
-          Review the candidate list and rerun with
-          -e housekeeping_delete=true to enable cleanup.
+          Review the candidate list before enabling cleanup.
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
-        - not housekeeping_delete
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
+        - not (housekeeping_delete | bool)
 
     - name: Delete eligible core dump files
       ansible.builtin.file:
@@ -168,7 +163,7 @@
         label: "{{ item.path }}"
       register: housekeeping_deletion
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
 
     - name: Record deleted file paths in the housekeeping log
@@ -180,16 +175,15 @@
         executable: /bin/bash
       loop: "{{ housekeeping_deletion.results | default([]) }}"
       loop_control:
-        label: "{{ item.item.path }}"
+        label: "{{ item.item.path | default('unknown') }}"
       changed_when: false
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
         - item.changed | default(false)
 
     - name: Read filesystem utilization after cleanup
       ansible.builtin.shell: |
-        set -o pipefail
         df -P "{{ housekeeping_directory }}" |
           awk 'NR == 2 {
             gsub(/%/, "", $5);
@@ -200,7 +194,7 @@
       register: housekeeping_usage_after
       changed_when: false
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
 
     - name: Validate post-cleanup utilization
@@ -209,7 +203,18 @@
           - housekeeping_usage_after.stdout | trim is match('^[0-9]+$')
         fail_msg: "Unable to determine filesystem utilization after cleanup."
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
+        - housekeeping_delete | bool
+
+    - name: Report post-cleanup filesystem utilization
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem: {{ housekeeping_mountpoint }}"
+          - "Utilization before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
+          - "Utilization after cleanup: {{ housekeeping_usage_after.stdout | trim }}%"
+          - "Threshold: {{ housekeeping_threshold }}%"
+      when:
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
 
     - name: Report unsuccessful housekeeping
@@ -221,9 +226,9 @@
           Threshold={{ housekeeping_threshold }}%.
           PSD/operations investigation is required.
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
-        - housekeeping_usage_after.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_after.stdout | int) > (housekeeping_threshold | int)
 
     - name: Report successful housekeeping
       ansible.builtin.debug:
@@ -231,7 +236,8 @@
           EXIT_CODE=1 - Housekeeping performed successfully.
           Usage before={{ housekeeping_usage_before.stdout | trim }}%.
           Usage after={{ housekeeping_usage_after.stdout | trim }}%.
+          Threshold={{ housekeeping_threshold }}%.
       when:
-        - housekeeping_usage_before.stdout | int > housekeeping_threshold
+        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
-        - housekeeping_usage_after.stdout | int <= housekeeping_threshold
+        - (housekeeping_usage_after.stdout | int) <= (housekeeping_threshold | int)
