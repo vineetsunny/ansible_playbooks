@@ -1,3 +1,12 @@
+## The intention of this script is to housekeep /opt file system when it reaches 75% and before it turns into an Incident.
+## The script focuses on deleting/zipping files older than specific days provided by patrol, control-m, Storage netbackup, WAS Support & VCS debuginfo 
+## Exit Codes
+## 0 - Housekeeping Not Required, under threshold 
+## 1 - Housekeeping performed
+## 2 - Still Same after Housekeeping 
+## 3 - No Files Found with Criteria
+## 21 - Directory not Present
+## 22 - File System Not Mounted
 ---
 - name: Housekeep /opt filesystem on Linux VMs
   hosts: linux-test
