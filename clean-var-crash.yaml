@@ -1,3 +1,16 @@
+## The intention of this script is to housekeep /var file system when it reaches 65% 
+## The script focuses on deleting files under /var/crash which are older than 3 days and start with name core.*
+## Exit Codes
+## 0 - Housekeeping Not Required, under threshold 
+## 21 - Directory not Present 
+## 22 - File System Not Mounted
+## 23 - Region not supported 
+## 3 - No Files Found with Criteria
+## 2 - Still Same after Housekeeping 
+## 1 - Housekeeping Performed
+##
+## Logging
+## Log File on the Server : /var/log/housekeeping-psd-task.log
 ---
 - name: Housekeeping of /var filesystem on Linux systems
   hosts: linux-test
