@@ -183,63 +183,54 @@
         - item.changed | default(false)
      
     - name: Read filesystem utilization after cleanup
-      ansible.builtin.shell: |
-        df -P "{{ housekeeping_directory }}" |
-          awk 'NR == 2 {
-            gsub(/%/, "", $5);
-            print $5
-          }'
-      args:
-        executable: /bin/bash
-      register: housekeeping_usage_after
+      ansible.builtin.command:
+        argv:
+          - df
+          - -P
+          - "{{ housekeeping_directory }}"
+      register: housekeeping_df_after
       changed_when: false
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
 
-    - name: Validate post-cleanup utilization result
-      ansible.builtin.assert:
-        that:
-          - housekeeping_usage_after is defined
-          - housekeeping_usage_after.stdout is defined
-          - housekeeping_usage_after.stdout | trim is match('^[0-9]+$')
-        fail_msg: >-
-          Unable to determine post-cleanup filesystem utilization.
-          Check whether the measurement task was skipped or failed.
+    - name: Extract post-cleanup utilization
+      ansible.builtin.set_fact:
+        housekeeping_usage_after: >-
+          {{ housekeeping_df_after.stdout_lines[1].split()[4]
+             | regex_replace('%', '') | int }}
       when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_delete | bool
+        - housekeeping_df_after is not skipped
 
-    - name: Report actual post-cleanup utilization
+    - name: Report post-cleanup filesystem utilization
       ansible.builtin.debug:
         msg:
-          - "Before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
-          - "After cleanup: {{ housekeeping_usage_after.stdout | trim }}%"
+          - "Filesystem: {{ housekeeping_mountpoint }}"
+          - "Utilization before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
+          - "Utilization after cleanup: {{ housekeeping_usage_after }}%"
           - "Threshold: {{ housekeeping_threshold }}%"
       when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_delete | bool
+        - housekeeping_usage_after is defined
 
     - name: Report unsuccessful housekeeping
       ansible.builtin.fail:
         msg: >-
           EXIT_CODE=2 - Usage remains above the threshold after cleanup.
           Before={{ housekeeping_usage_before.stdout | trim }}%.
-          After={{ housekeeping_usage_after.stdout | trim }}%.
+          After={{ housekeeping_usage_after }}%.
           Threshold={{ housekeeping_threshold }}%.
+          PSD/operations investigation is required.
       when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_delete | bool
-        - (housekeeping_usage_after.stdout | int) > (housekeeping_threshold | int)
+        - housekeeping_usage_after is defined
+        - housekeeping_usage_after | int > housekeeping_threshold | int
 
     - name: Report successful housekeeping
       ansible.builtin.debug:
         msg: >-
           EXIT_CODE=1 - Housekeeping performed successfully.
           Usage before={{ housekeeping_usage_before.stdout | trim }}%.
-          Usage after={{ housekeeping_usage_after.stdout | trim }}%.
+          Usage after={{ housekeeping_usage_after }}%.
           Threshold={{ housekeeping_threshold }}%.
       when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_delete | bool
-        - (housekeeping_usage_after.stdout | int) <= (housekeeping_threshold | int)
+        - housekeeping_usage_after is defined
+        - housekeeping_usage_after | int <= housekeeping_threshold | int
