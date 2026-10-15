@@ -86,10 +86,10 @@
 
     - name: Delete identified core files
       ansible.builtin.file:
-        path: "{{ item.path }}"
+        path: "{{ item }}"
         state: absent
-      loop: "{{ found_files.files }}"
-
+      loop: "{{ found_files.files | map(attribute='path') | list }}"
+      
     - name: Append deleted files log
       ansible.builtin.blockinfile:
         path: "{{ logfile }}"
