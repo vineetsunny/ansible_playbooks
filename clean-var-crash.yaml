@@ -1,99 +1,59 @@
 ---
-- name: Housekeep /var filesystem
+- name: Housekeeping of /var filesystem on Linux systems
   hosts: linux-test
   become: true
-  gather_facts: false
+  gather_facts: true
 
   vars:
-    target_dir: /var/crash
-    filesystem: /var
-    threshold: 65
+    filesystem: "/var"
+    target_dir: "/var/crash"
+    usage_threshold: 65
     file_age_days: 3
-    logfile: /var/log/housekeeping-psd-task.log
-    log_prefix: "Tanium-Housekeeping-PSD-Task-VAR-LOG"
+    log_file: "/var/log/housekeeping-psd-task.log"
+    task_name: "Tanium-Housekeeping-PSD-Task-VAR"
 
   tasks:
-
-    # --------------------------------------------------
-    # 1. Ensure log file exists
-    # --------------------------------------------------
-
-    - name: Ensure housekeeping log file exists
-      ansible.builtin.file:
-        path: "{{ logfile }}"
-        state: touch
-        owner: root
-        group: root
-        mode: "0640"
-
-    # --------------------------------------------------
-    # 2. Validate target directory
-    # --------------------------------------------------
+    - name: Initialize housekeeping result
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 0
+        housekeeping_result: "Housekeeping not started"
+        usage_before: 0
+        usage_after: 0
+        deleted_files: []
 
     - name: Check whether target directory exists
       ansible.builtin.stat:
         path: "{{ target_dir }}"
       register: target_dir_stat
 
-    - name: Log missing directory
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Directory {{ target_dir }} Not Present" \
-          >> {{ logfile | quote }}
-      when: not (target_dir_stat.stat.isdir | default(false))
-      changed_when: true
+    - name: Report missing target directory
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 21
+        housekeeping_result: "Directory not present: {{ target_dir }}"
+      when: >
+        not target_dir_stat.stat.exists
+        or not target_dir_stat.stat.isdir
 
-    - name: Set exit code for missing directory
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 21
-          housekeeping_result: "Directory not present"
-      when: not (target_dir_stat.stat.isdir | default(false))
-
-    - name: Stop when directory is missing
-      ansible.builtin.meta: end_play
-      when: not (target_dir_stat.stat.isdir | default(false))
-
-    # --------------------------------------------------
-    # 3. Validate filesystem mount point
-    # --------------------------------------------------
-
-    - name: Check whether /var is a mount point
+    - name: Check whether target filesystem is mounted
       ansible.builtin.command:
         argv:
-          - mountpoint
-          - -q
+          - findmnt
+          - --mountpoint
           - "{{ filesystem }}"
       register: mount_check
       changed_when: false
       failed_when: false
+      when: (housekeeping_exit_code | int) == 0
 
-    - name: Log filesystem not mounted
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Mount Point {{ filesystem }} Not Present" \
-          >> {{ logfile | quote }}
-      when: mount_check.rc != 0
-      changed_when: true
+    - name: Report target filesystem is not mounted
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 22
+        housekeeping_result: "Filesystem not mounted at {{ filesystem }}"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - mount_check.rc != 0
 
-    - name: Set exit code for filesystem not mounted
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 22
-          housekeeping_result: "Filesystem not mounted"
-      when: mount_check.rc != 0
-
-    - name: Stop when filesystem is not mounted
-      ansible.builtin.meta: end_play
-      when: mount_check.rc != 0
-
-    # --------------------------------------------------
-    # 4. Check utilization before housekeeping
-    # --------------------------------------------------
-
-    - name: Check filesystem utilization before housekeeping
+    - name: Get current filesystem usage
       ansible.builtin.command:
         argv:
           - df
@@ -101,47 +61,21 @@
           - "{{ filesystem }}"
       register: df_before
       changed_when: false
+      when: (housekeeping_exit_code | int) == 0
 
-    - name: Calculate filesystem utilization before housekeeping
+    - name: Set initial filesystem usage
       ansible.builtin.set_fact:
-        usage_before: >-
-          {{
-            df_before.stdout_lines[-1].split()[-2]
-            | regex_replace('%', '')
-            | int
-          }}
+        usage_before: "{{ df_before.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
+        usage_after: "{{ df_before.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
+      when: (housekeeping_exit_code | int) == 0
 
-    - name: Report current utilization
-      ansible.builtin.debug:
-        msg: >-
-          Current {{ filesystem }} utilization:
-          {{ usage_before | int }}%
-          (threshold: {{ threshold | int }}%)
-
-    - name: Log housekeeping not required
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Disk Usage: {{ usage_before | int }}%, result: Housekeeping Not Required" \
-          >> {{ logfile | quote }}
-      when: (usage_before | int) <= (threshold | int)
-      changed_when: true
-
-    - name: Set exit code when utilization is below threshold
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 0
-          housekeeping_result: "Housekeeping not required"
-          usage_before: "{{ usage_before | int }}"
-      when: (usage_before | int) <= (threshold | int)
-
-    - name: Stop when housekeeping is not required
-      ansible.builtin.meta: end_play
-      when: (usage_before | int) <= (threshold | int)
-
-    # --------------------------------------------------
-    # 5. Find eligible core dump files
-    # --------------------------------------------------
+    - name: Stop housekeeping when usage is within threshold
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 0
+        housekeeping_result: "Housekeeping not required; usage is {{ usage_before }}%"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) <= (usage_threshold | int)
 
     - name: Find eligible core dump files older than configured age
       ansible.builtin.find:
@@ -154,167 +88,126 @@
         age_stamp: mtime
         recurse: false
       register: eligible_files
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
 
-    - name: Report eligible files
-      ansible.builtin.debug:
-        msg: >-
-          Found {{ eligible_files.matched | int }} eligible file(s)
-          under {{ target_dir }}.
-
-    # --------------------------------------------------
-    # 6. Handle no eligible files
-    # --------------------------------------------------
-
-    - name: Log when no eligible files were found
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Disk Usage: {{ usage_before | int }}%, result: NO_FILES_FOUND - Needs PSD Attention" \
-          >> {{ logfile | quote }}
-      when: (eligible_files.matched | int) == 0
-      changed_when: true
-
-    - name: Set exit code when no eligible files were found
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 3
-          housekeeping_result: "No files found with criteria"
-          usage_before: "{{ usage_before | int }}"
-          files_deleted: 0
-      when: (eligible_files.matched | int) == 0
-
-    - name: Stop when no eligible files were found
-      ansible.builtin.meta: end_play
-      when: (eligible_files.matched | int) == 0
-
-    # --------------------------------------------------
-    # 7. Delete eligible files
-    # --------------------------------------------------
+    - name: Report no eligible files found
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 3
+        housekeeping_result: "No eligible core dump files found; PSD attention required"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) == 0
 
     - name: Delete eligible core dump files
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: absent
-      loop: "{{ eligible_files.files }}"
+      loop: "{{ eligible_files.files | default([]) }}"
       loop_control:
         label: "{{ item.path }}"
-      register: deletion_results
+      register: cleanup_results
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
 
-    - name: Build list of files actually deleted
+    - name: Record files successfully removed
       ansible.builtin.set_fact:
         deleted_files: >-
           {{
-            deletion_results.results | default([])
+            cleanup_results.results | default([])
             | selectattr('changed', 'defined')
             | selectattr('changed', 'equalto', true)
             | map(attribute='item.path')
             | list
           }}
-
-    - name: Report deleted files
-      ansible.builtin.debug:
-        msg:
-          - "Files deleted: {{ deleted_files | length }}"
-          - "{{ deleted_files }}"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
 
     - name: Log deleted files
-      ansible.builtin.shell: |
-        {
-          printf '%s %s\n' \
-            "$(date '+%b %d %T')" \
-            "{{ log_prefix }} Files Deleted"
-          {% for file in deleted_files %}
-          printf '%s\n' {{ file | quote }}
-          {% endfor %}
-          printf '%s\n' "====================="
-        } >> {{ logfile | quote }}
-      when: (deleted_files | length) > 0
-      changed_when: true
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        create: true
+        mode: "0640"
+        insertafter: EOF
+        line: "{{ ansible_date_time.iso8601 }} {{ task_name }} | Deleted: {{ item }}"
+      loop: "{{ deleted_files }}"
+      when: deleted_files | length > 0
 
-    # --------------------------------------------------
-    # 8. Check utilization after housekeeping
-    # --------------------------------------------------
-    - name: Check filesystem utilization after housekeeping
+    # Recalculate usage using the same working method as the /tmp playbook.
+    - name: Get filesystem usage after housekeeping
       ansible.builtin.command:
         argv:
           - df
-          - --output=pcent
+          - -P
           - "{{ filesystem }}"
       register: df_after
       changed_when: false
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
 
-    - name: Calculate filesystem utilization after housekeeping
+    - name: Set final filesystem usage
       ansible.builtin.set_fact:
-        usage_after: "{{ df_after.stdout_lines[-1] | trim | regex_replace('%', '') | int }}"
+        usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
 
-    - name: Report final utilization
+    - name: Report unsuccessful housekeeping
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 2
+        housekeeping_result: "Usage remains above threshold after housekeeping"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
+        - (usage_after | int) > (usage_threshold | int)
+
+    - name: Report successful housekeeping
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 1
+        housekeeping_result: "Housekeeping performed successfully"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
+        - (usage_after | int) <= (usage_threshold | int)
+
+    - name: Write housekeeping summary to log
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        create: true
+        mode: "0640"
+        insertafter: EOF
+        line: >-
+          {{ ansible_date_time.iso8601 }} {{ task_name }} |
+          Usage before={{ usage_before }}% |
+          Usage after={{ usage_after }}% |
+          Deleted files={{ deleted_files | length }} |
+          Exit code={{ housekeeping_exit_code }} |
+          Result={{ housekeeping_result }}
+
+    - name: Display housekeeping summary
       ansible.builtin.debug:
         msg:
-          - "Utilization before housekeeping: {{ usage_before | int }}%"
-          - "Utilization after housekeeping: {{ usage_after | int }}%"
-          - "Threshold: {{ threshold | int }}%"
+          - "Filesystem: {{ filesystem }}"
+          - "Cleanup directory: {{ target_dir }}"
+          - "Usage before: {{ usage_before }}%"
+          - "Usage after: {{ usage_after }}%"
+          - "Threshold: {{ usage_threshold }}%"
           - "Files deleted: {{ deleted_files | length }}"
+          - "Result: {{ housekeeping_result }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
 
-    # --------------------------------------------------
-    # 9. Report unsuccessful housekeeping
-    # --------------------------------------------------
-
-    - name: Log unsuccessful housekeeping
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Disk Usage After Housekeeping: {{ usage_after | int }}%, Usage Before: {{ usage_before | int }}%, result: NO_SUCCESS - Needs PSD Attention" \
-          >> {{ logfile | quote }}
-      when: (usage_after | int) > (threshold | int)
-      changed_when: true
-
-    - name: Set exit code when utilization remains high
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 2
-          housekeeping_result: "Still same after housekeeping"
-          usage_before: "{{ usage_before | int }}"
-          usage_after: "{{ usage_after | int }}"
-          files_deleted: "{{ deleted_files | length }}"
-      when: (usage_after | int) > (threshold | int)
-
-    # --------------------------------------------------
-    # 10. Report successful housekeeping
-    # --------------------------------------------------
-
-    - name: Log successful housekeeping
-      ansible.builtin.shell: |
-        printf '%s %s\n' \
-          "$(date '+%b %d %T')" \
-          "{{ log_prefix }} Disk Usage After Housekeeping: {{ usage_after | int }}%, Usage Before: {{ usage_before | int }}%, result: SUCCESS - Housekeeping Performed" \
-          >> {{ logfile | quote }}
-      when: (usage_after | int) <= (threshold | int)
-      changed_when: true
-
-    - name: Set exit code when housekeeping succeeds
-      ansible.builtin.set_stats:
-        data:
-          housekeeping_exit_code: 1
-          housekeeping_result: "Housekeeping performed"
-          usage_before: "{{ usage_before | int }}"
-          usage_after: "{{ usage_after | int }}"
-          files_deleted: "{{ deleted_files | length }}"
-      when: (usage_after | int) <= (threshold | int)
-
-    - name: Display final housekeeping result
-      ansible.builtin.debug:
-        msg:
-          exit_code: >-
-            {{
-              2 if (usage_after | int) > (threshold | int)
-              else 1
-            }}
-          result: >-
-            {{
-              'Still same after housekeeping'
-              if (usage_after | int) > (threshold | int)
-              else 'Housekeeping performed'
-            }}
-          usage_before: "{{ usage_before | int }}"
-          usage_after: "{{ usage_after | int }}"
-          files_deleted: "{{ deleted_files | length }}"
+    - name: Return housekeeping failure status
+      ansible.builtin.fail:
+        msg: "{{ housekeeping_result }} (logical exit code {{ housekeeping_exit_code }})"
+      when: (housekeeping_exit_code | int) not in [0, 1]
