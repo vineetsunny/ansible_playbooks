@@ -53,7 +53,7 @@
         - (housekeeping_exit_code | int) == 0
         - mount_check.rc != 0
 
-    - name: Get current filesystem usage
+    - name: Get filesystem usage before housekeeping
       ansible.builtin.command:
         argv:
           - df
@@ -77,7 +77,7 @@
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) <= (usage_threshold | int)
 
-    - name: Find eligible core dump files older than configured age
+    - name: Find eligible core dump files
       ansible.builtin.find:
         paths: "{{ target_dir }}"
         patterns:
@@ -139,7 +139,7 @@
       loop: "{{ deleted_files }}"
       when: deleted_files | length > 0
 
-    # Recalculate usage using the same working method as the /tmp playbook.
+    # Recalculate filesystem utilization after deletion.
     - name: Get filesystem usage after housekeeping
       ansible.builtin.command:
         argv:
@@ -153,9 +153,28 @@
         - (usage_before | int) > (usage_threshold | int)
         - (eligible_files.matched | int) > 0
 
+    - name: Display raw post-cleanup df output
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem checked: {{ filesystem }}"
+          - "Raw df output:"
+          - "{{ df_after.stdout }}"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
+
     - name: Set final filesystem usage
       ansible.builtin.set_fact:
         usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
+      when:
+        - (housekeeping_exit_code | int) == 0
+        - (usage_before | int) > (usage_threshold | int)
+        - (eligible_files.matched | int) > 0
+
+    - name: Display calculated post-cleanup usage
+      ansible.builtin.debug:
+        msg: "Calculated usage after housekeeping: {{ usage_after }}%"
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
