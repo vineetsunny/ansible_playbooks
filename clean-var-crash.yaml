@@ -110,7 +110,7 @@
           "$(date '+%b %d %T')" \
           "{{ log_prefix }} Disk Usage: {{ usage_before }}%, result: Housekeeping Not Required" \
           >> {{ logfile | quote }}
-      when: usage_before <= threshold
+      when: (usage_before | int) <= (threshold | int)
       changed_when: true
 
     - name: Set exit code when utilization is below threshold
