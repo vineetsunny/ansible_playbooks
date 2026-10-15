@@ -181,7 +181,7 @@
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
         - item.changed | default(false)
-
+     
     - name: Read filesystem utilization after cleanup
       ansible.builtin.shell: |
         df -P "{{ housekeeping_directory }}" |
@@ -196,28 +196,25 @@
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
-    - name: Debug actual post-cleanup utilization
-      ansible.builtin.debug:
-        msg:
-          - "BEFORE={{ housekeeping_usage_before.stdout | trim }}%"
-          - "AFTER_RAW={{ housekeeping_usage_after.stdout | to_json }}"
-          - "AFTER_INT={{ housekeeping_usage_after.stdout | trim | int }}%"
-          - "THRESHOLD={{ housekeeping_threshold }}%"
-    - name: Validate post-cleanup utilization
+
+    - name: Validate post-cleanup utilization result
       ansible.builtin.assert:
         that:
+          - housekeeping_usage_after is defined
+          - housekeeping_usage_after.stdout is defined
           - housekeeping_usage_after.stdout | trim is match('^[0-9]+$')
-        fail_msg: "Unable to determine filesystem utilization after cleanup."
+        fail_msg: >-
+          Unable to determine post-cleanup filesystem utilization.
+          Check whether the measurement task was skipped or failed.
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
 
-    - name: Report post-cleanup filesystem utilization
+    - name: Report actual post-cleanup utilization
       ansible.builtin.debug:
         msg:
-          - "Filesystem: {{ housekeeping_mountpoint }}"
-          - "Utilization before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
-          - "Utilization after cleanup: {{ housekeeping_usage_after.stdout | trim }}%"
+          - "Before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
+          - "After cleanup: {{ housekeeping_usage_after.stdout | trim }}%"
           - "Threshold: {{ housekeeping_threshold }}%"
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
@@ -230,7 +227,6 @@
           Before={{ housekeeping_usage_before.stdout | trim }}%.
           After={{ housekeeping_usage_after.stdout | trim }}%.
           Threshold={{ housekeeping_threshold }}%.
-          PSD/operations investigation is required.
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
