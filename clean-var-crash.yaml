@@ -1,4 +1,3 @@
-
 ---
 - name: Housekeep /var filesystem by removing old core dump files
   hosts: linux-test
@@ -57,11 +56,7 @@
 
     - name: Read filesystem utilization before cleanup
       ansible.builtin.shell: |
-        df -P "{{ housekeeping_directory }}" |
-          awk 'NR == 2 {
-            gsub(/%/, "", $5);
-            print $5
-          }'
+        df -P "{{ housekeeping_directory }}" | awk 'END{gsub(/%/, "", $(NF-1)); print $(NF-1)}'
       args:
         executable: /bin/bash
       register: housekeeping_usage_before
@@ -103,10 +98,10 @@
         msg:
           - "Filesystem utilization before cleanup: {{ housekeeping_usage_before.stdout | trim }}%"
           - "Threshold: {{ housekeeping_threshold }}%"
-          - "Eligible files found: {{ housekeeping_candidates.matched }}"
+          - "Eligible files found: {{ housekeeping_candidates.matched | default(0) }}"
           - "Deletion enabled: {{ housekeeping_delete }}"
           - "Eligible file paths:"
-          - "{{ housekeeping_candidates.files | map(attribute='path') | list }}"
+          - "{{ housekeeping_candidates.files | default([]) | map(attribute='path') | list }}"
       when: >-
         (housekeeping_usage_before.stdout | int)
         > (housekeeping_threshold | int)
@@ -125,7 +120,7 @@
     - name: Log housekeeping assessment
       ansible.builtin.shell: |
         printf '%s\n' \
-          "{{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }} | HOST={{ inventory_hostname }} | USAGE_BEFORE={{ housekeeping_usage_before.stdout | trim }}% | THRESHOLD={{ housekeeping_threshold }}% | CANDIDATES={{ housekeeping_candidates.matched }} | DELETE_ENABLED={{ housekeeping_delete }}" \
+          "{{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }} | HOST={{ inventory_hostname }} | USAGE_BEFORE={{ housekeeping_usage_before.stdout | trim }}% | THRESHOLD={{ housekeeping_threshold }}% | CANDIDATES={{ housekeeping_candidates.matched | default(0) }} | DELETE_ENABLED={{ housekeeping_delete }}" \
           >> "{{ housekeeping_logfile }}"
       args:
         executable: /bin/bash
@@ -143,7 +138,7 @@
           {{ housekeeping_directory }}.
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_candidates.matched | int == 0
+        - (housekeeping_candidates.matched | default(0) | int) == 0
 
     - name: Report that deletion is disabled
       ansible.builtin.debug:
@@ -158,7 +153,7 @@
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: absent
-      loop: "{{ housekeeping_candidates.files }}"
+      loop: "{{ housekeeping_candidates.files | default([]) }}"
       loop_control:
         label: "{{ item.path }}"
       register: housekeeping_deletion
@@ -181,13 +176,12 @@
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
         - item.changed | default(false)
-     
+
     - name: Read filesystem utilization after cleanup
-      ansible.builtin.command:
-        argv:
-          - df
-          - -P
-          - "{{ housekeeping_directory }}"
+      ansible.builtin.shell: |
+        df -P "{{ housekeeping_directory }}" | awk 'END{gsub(/%/, "", $(NF-1)); print $(NF-1)}'
+      args:
+        executable: /bin/bash
       register: housekeeping_df_after
       changed_when: false
       when:
@@ -196,11 +190,11 @@
 
     - name: Extract post-cleanup utilization
       ansible.builtin.set_fact:
-        housekeeping_usage_after: >-
-          {{ housekeeping_df_after.stdout_lines[1].split()[4]
-             | regex_replace('%', '') | int }}
+        housekeeping_usage_after: "{{ housekeeping_df_after.stdout | trim | int }}"
       when:
-        - housekeeping_df_after is not skipped
+        - housekeeping_df_after is defined
+        - housekeeping_df_after.stdout is defined
+        - housekeeping_df_after.stdout | trim | length > 0
 
     - name: Report post-cleanup filesystem utilization
       ansible.builtin.debug:
