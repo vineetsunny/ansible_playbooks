@@ -129,17 +129,7 @@
         - (usage_before | int) > (usage_threshold | int)
         - (eligible_files.matched | int) > 0
 
-    - name: Log deleted files
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        create: true
-        mode: "0640"
-        insertafter: EOF
-        line: "{{ ansible_date_time.iso8601 }} {{ task_name }} | Deleted: {{ item }}"
-      loop: "{{ deleted_files }}"
-      when: deleted_files | length > 0
-
-    # Recalculate filesystem utilization after deletion.
+    # Recheck the filesystem immediately after deletion.
     - name: Get filesystem usage after housekeeping
       ansible.builtin.command:
         argv:
@@ -153,32 +143,28 @@
         - (usage_before | int) > (usage_threshold | int)
         - (eligible_files.matched | int) > 0
 
-    - name: Display raw post-cleanup df output
+    - name: Display actual post-deletion filesystem usage
       ansible.builtin.debug:
         msg:
-          - "Filesystem checked: {{ filesystem }}"
-          - "Raw df output:"
+          - "Filesystem: {{ filesystem }}"
+          - "Post-deletion df output:"
           - "{{ df_after.stdout }}"
-      when:
-        - (housekeeping_exit_code | int) == 0
-        - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+      when: df_after is not skipped
 
-    - name: Set final filesystem usage
+    - name: Calculate final filesystem usage
       ansible.builtin.set_fact:
         usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
-      when:
-        - (housekeeping_exit_code | int) == 0
-        - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+      when: df_after is not skipped
 
-    - name: Display calculated post-cleanup usage
-      ansible.builtin.debug:
-        msg: "Calculated usage after housekeeping: {{ usage_after }}%"
-      when:
-        - (housekeeping_exit_code | int) == 0
-        - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+    - name: Log deleted files
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        create: true
+        mode: "0640"
+        insertafter: EOF
+        line: "{{ ansible_date_time.iso8601 }} {{ task_name }} | Deleted: {{ item }}"
+      loop: "{{ deleted_files }}"
+      when: deleted_files | length > 0
 
     - name: Report unsuccessful housekeeping
       ansible.builtin.set_fact:
@@ -230,3 +216,4 @@
       ansible.builtin.fail:
         msg: "{{ housekeeping_result }} (logical exit code {{ housekeeping_exit_code }})"
       when: (housekeeping_exit_code | int) not in [0, 1]
+
