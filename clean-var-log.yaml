@@ -2,28 +2,14 @@
 - name: Clean-var-log housekeeping
   hosts: all
   become: true
-  gather_facts: false
+  gather_facts: true
 
   vars:
     housekeeping_dir: /var/log
-    filesystem_path: /var
+    filesystem_path: /var/log
     housekeeping_threshold: 65
-    supported_regions:
-      - GB
-      - UK
-      - US
-
     housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
     housekeeping_tag: Tanium-Housekeeping-PSD-Task-VAR-LOG
-
-    # Exit codes
-    # 0  - Housekeeping Not Required
-    # 1  - Housekeeping Performed
-    # 2  - Usage Still High After Housekeeping
-    # 3  - No Files Found With Criteria
-    # 21 - Directory Not Present
-    # 22 - File System Not Mounted
-    # 23 - Region Not Supported
 
   tasks:
 
@@ -33,15 +19,8 @@
         housekeeping_result: ""
         housekeeping_files: []
 
-#    - name: Check whether the server region is supported
-#      ansible.builtin.set_fact:
-#        housekeeping_exit_code: 23
-#        housekeeping_result: "UNSUPPORTED_REGION - Server region is not supported"
-#      when: (server_region | default('UNKNOWN') | upper) not in supported_regions
-
-#    - name: Stop processing for unsupported regions
-#      ansible.builtin.meta: end_host
-#      when: housekeeping_exit_code == 23
+    # Region validation temporarily disabled.
+    # Re-enable when server region information is available.
 
     - name: Check whether /var/log directory exists
       ansible.builtin.stat:
@@ -75,25 +54,39 @@
     - name: Check filesystem mount status
       ansible.builtin.set_fact:
         housekeeping_exit_code: 22
-        housekeeping_result: "FILESYSTEM_NOT_MOUNTED - /var is not mounted"
-      when: var_mount.rc != 0 or (var_mount.stdout | trim | length == 0)
+        housekeeping_result: "FILESYSTEM_NOT_MOUNTED - Filesystem check failed"
+      when: var_mount.rc != 0 or
+            (var_mount.stdout | trim | length == 0)
 
     - name: Stop processing when filesystem is not mounted
       ansible.builtin.meta: end_host
       when: housekeeping_exit_code == 22
 
     - name: Get filesystem utilization before housekeeping
-      ansible.builtin.shell: |
-        df -P "{{ filesystem_path }}" |
-        awk 'NR == 2 {gsub(/%/, "", $5); print $5}'
-      args:
-        executable: /bin/bash
-      register: usage_before
+      ansible.builtin.command:
+        argv:
+          - df
+          - -P
+          - "{{ filesystem_path }}"
+      register: var_log_df_before
       changed_when: false
+
+    - name: Display current /var/log filesystem utilization
+      ansible.builtin.debug:
+        msg: "{{ var_log_df_before.stdout }}"
 
     - name: Record initial filesystem utilization
       ansible.builtin.set_fact:
-        usage_before_pct: "{{ usage_before.stdout | trim | int }}"
+        usage_before_pct: >-
+          {{
+            var_log_df_before.stdout_lines[1].split()[4]
+            | regex_replace('%', '')
+            | int
+          }}
+
+    - name: Display current utilization percentage
+      ansible.builtin.debug:
+        msg: "Current /var/log filesystem utilization: {{ usage_before_pct }}%"
 
     - name: Skip housekeeping when usage is within threshold
       ansible.builtin.set_fact:
@@ -161,7 +154,7 @@
         owner: root
         group: root
         line: >-
-          {{ ansible_date_time.date | default('') }}
+          {{ ansible_date_time.date }}
           {{ housekeeping_tag }}
           Disk Usage: {{ usage_before_pct }}%,
           Result: {{ housekeeping_result }}
@@ -181,20 +174,34 @@
       loop_control:
         label: "{{ item.path }}"
       register: compression_result
-      when: housekeeping_files | length > 0
 
     - name: Get filesystem utilization after housekeeping
-      ansible.builtin.shell: |
-        df -P "{{ filesystem_path }}" |
-        awk 'NR == 2 {gsub(/%/, "", $5); print $5}'
-      args:
-        executable: /bin/bash
-      register: usage_after
+      ansible.builtin.command:
+        argv:
+          - df
+          - -P
+          - "{{ filesystem_path }}"
+      register: var_log_df_after
       changed_when: false
+
+    - name: Display filesystem utilization after housekeeping
+      ansible.builtin.debug:
+        msg: "{{ var_log_df_after.stdout }}"
 
     - name: Record final filesystem utilization
       ansible.builtin.set_fact:
-        usage_after_pct: "{{ usage_after.stdout | trim | int }}"
+        usage_after_pct: >-
+          {{
+            var_log_df_after.stdout_lines[1].split()[4]
+            | regex_replace('%', '')
+            | int
+          }}
+
+    - name: Display before and after utilization
+      ansible.builtin.debug:
+        msg:
+          - "Usage before housekeeping: {{ usage_before_pct }}%"
+          - "Usage after housekeeping: {{ usage_after_pct }}%"
 
     - name: Determine housekeeping outcome
       ansible.builtin.set_fact:
@@ -213,7 +220,7 @@
     - name: Log housekeeping details
       ansible.builtin.shell: |
         {
-          echo "Files Processed - {{ ansible_date_time.date | default('') }}"
+          echo "Files Processed - {{ ansible_date_time.date }}"
           echo "========================================"
           {% for file in housekeeping_files %}
           echo "{{ file.path }} -> {{ file.path }}.gz"
@@ -243,4 +250,3 @@
           usage after={{ usage_after_pct }}%,
           exit code={{ housekeeping_exit_code }}.
       when: housekeeping_exit_code == 2
-
