@@ -128,6 +128,16 @@
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
         - (eligible_files.matched | int) > 0
+   
+    - name: Log deleted files
+      ansible.builtin.lineinfile:
+        path: "{{ log_file }}"
+        create: true
+        mode: "0640"
+        insertafter: EOF
+        line: "{{ ansible_date_time.iso8601 }} {{ task_name }} | Deleted: {{ item }}"
+      loop: "{{ deleted_files }}"
+      when: deleted_files | length > 0 
 
     # Recheck the filesystem immediately after deletion.
     - name: Get filesystem usage after housekeeping
@@ -139,32 +149,22 @@
       register: df_after
       changed_when: false
       when:
-        - (housekeeping_exit_code | int) == 0
-        - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+        - housekeeping_exit_code == 0
+        - usage_before | int > usage_threshold
+        - eligible_files.matched | int > 0
 
-    - name: Display actual post-deletion filesystem usage
-      ansible.builtin.debug:
-        msg:
-          - "Filesystem: {{ filesystem }}"
-          - "Post-deletion df output:"
-          - "{{ df_after.stdout }}"
-      when: df_after is not skipped
+    - name: Set final filesystem usage
+      ansible.builtin.set_fact:
+        usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
+      when:
+        - housekeeping_exit_code == 0
+        - usage_before | int > usage_threshold
+        - eligible_files.matched | int > 0
 
     - name: Calculate final filesystem usage
       ansible.builtin.set_fact:
         usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
       when: df_after is not skipped
-
-    - name: Log deleted files
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        create: true
-        mode: "0640"
-        insertafter: EOF
-        line: "{{ ansible_date_time.iso8601 }} {{ task_name }} | Deleted: {{ item }}"
-      loop: "{{ deleted_files }}"
-      when: deleted_files | length > 0
 
     - name: Report unsuccessful housekeeping
       ansible.builtin.set_fact:
