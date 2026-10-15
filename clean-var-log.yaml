@@ -33,15 +33,15 @@
         housekeeping_result: ""
         housekeeping_files: []
 
-    - name: Check whether the server region is supported
-      ansible.builtin.set_fact:
-        housekeeping_exit_code: 23
-        housekeeping_result: "UNSUPPORTED_REGION - Server region is not supported"
-      when: (server_region | default('UNKNOWN') | upper) not in supported_regions
+#    - name: Check whether the server region is supported
+#      ansible.builtin.set_fact:
+#        housekeeping_exit_code: 23
+#        housekeeping_result: "UNSUPPORTED_REGION - Server region is not supported"
+#      when: (server_region | default('UNKNOWN') | upper) not in supported_regions
 
-    - name: Stop processing for unsupported regions
-      ansible.builtin.meta: end_host
-      when: housekeeping_exit_code == 23
+#    - name: Stop processing for unsupported regions
+#      ansible.builtin.meta: end_host
+#      when: housekeeping_exit_code == 23
 
     - name: Check whether /var/log directory exists
       ansible.builtin.stat:
