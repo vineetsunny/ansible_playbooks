@@ -240,19 +240,21 @@
         argv:
           - df
           - -P
+          - --output=pcent
           - "{{ filesystem }}"
       register: df_after
       changed_when: false
 
     - name: Calculate filesystem utilization after housekeeping
       ansible.builtin.set_fact:
-        usage_after: >-
-          {{
-            df_after.stdout_lines[-1].split()[-2]
-            | regex_replace('%', '')
-            | int
-          }}
+        usage_after: "{{ df_after.stdout_lines[-1] | trim | regex_replace('%', '') | int }}"
 
+    - name: Display raw filesystem utilization after housekeeping
+      ansible.builtin.debug:
+        msg:
+          - "Raw df output: {{ df_after.stdout }}"
+          - "Calculated utilization after housekeeping: {{ usage_after | int }}%"
+    
     - name: Report final utilization
       ansible.builtin.debug:
         msg:
