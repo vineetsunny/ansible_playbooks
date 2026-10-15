@@ -1,4 +1,3 @@
-```yaml
 ---
 - name: Housekeep /var filesystem
   hosts: linux-test
@@ -271,4 +270,3 @@
           usage_before: "{{ usage_before }}"
           usage_after: "{{ usage_after }}"
           files_deleted: "{{ deleted_files | length }}"
-```
