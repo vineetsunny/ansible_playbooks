@@ -118,8 +118,8 @@
         data:
           housekeeping_exit_code: 0
           housekeeping_result: "Housekeeping not required"
-          usage_before: "{{ usage_before }}"
-      when: usage_before <= threshold
+          usage_before: "{{ usage_before | int }}"
+      when: (usage_before | int) <= (threshold | int)
 
     - name: Stop when housekeeping is not required
       ansible.builtin.meta: end_play
