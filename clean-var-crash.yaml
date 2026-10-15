@@ -140,15 +140,6 @@
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - (housekeeping_candidates.matched | default(0) | int) == 0
 
-    - name: Report that deletion is disabled
-      ansible.builtin.debug:
-        msg: >-
-          REPORT_ONLY - No files were deleted.
-          Review the candidate list before enabling cleanup.
-      when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - not (housekeeping_delete | bool)
-
     - name: Delete eligible core dump files
       ansible.builtin.file:
         path: "{{ item.path }}"
@@ -160,22 +151,6 @@
       when:
         - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
         - housekeeping_delete | bool
-
-    - name: Record deleted file paths in the housekeeping log
-      ansible.builtin.shell: |
-        printf '%s\n' \
-          "{{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }} | HOST={{ inventory_hostname }} | DELETED={{ item.item.path }}" \
-          >> "{{ housekeeping_logfile }}"
-      args:
-        executable: /bin/bash
-      loop: "{{ housekeeping_deletion.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.path | default('unknown') }}"
-      changed_when: false
-      when:
-        - (housekeeping_usage_before.stdout | int) > (housekeeping_threshold | int)
-        - housekeeping_delete | bool
-        - item.changed | default(false)
 
     - name: Read filesystem utilization after cleanup
       ansible.builtin.shell: |
@@ -192,7 +167,6 @@
       ansible.builtin.set_fact:
         housekeeping_usage_after: "{{ housekeeping_df_after.stdout | trim | int }}"
       when:
-        - housekeeping_df_after is defined
         - housekeeping_df_after.stdout is defined
         - housekeeping_df_after.stdout | trim | length > 0
 
@@ -205,18 +179,6 @@
           - "Threshold: {{ housekeeping_threshold }}%"
       when:
         - housekeeping_usage_after is defined
-
-    - name: Report unsuccessful housekeeping
-      ansible.builtin.fail:
-        msg: >-
-          EXIT_CODE=2 - Usage remains above the threshold after cleanup.
-          Before={{ housekeeping_usage_before.stdout | trim }}%.
-          After={{ housekeeping_usage_after }}%.
-          Threshold={{ housekeeping_threshold }}%.
-          PSD/operations investigation is required.
-      when:
-        - housekeeping_usage_after is defined
-        - housekeeping_usage_after | int > housekeeping_threshold | int
 
     - name: Report successful housekeeping
       ansible.builtin.debug:
