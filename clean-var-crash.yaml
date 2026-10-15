@@ -161,11 +161,6 @@
         - usage_before | int > usage_threshold
         - eligible_files.matched | int > 0
 
-    - name: Calculate final filesystem usage
-      ansible.builtin.set_fact:
-        usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
-      when: df_after is not skipped
-
     - name: Report unsuccessful housekeeping
       ansible.builtin.set_fact:
         housekeeping_exit_code: 2
