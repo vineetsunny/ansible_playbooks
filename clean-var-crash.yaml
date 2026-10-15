@@ -1,4 +1,3 @@
-```yaml
 ---
 - name: Housekeeping of /var filesystem on Linux systems
   hosts: linux-test
@@ -238,4 +237,3 @@
           {{ housekeeping_result }}
           (logical exit code {{ housekeeping_exit_code }})
       when: (housekeeping_exit_code | int) not in [0, 1]
-```
