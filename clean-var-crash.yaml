@@ -2,6 +2,7 @@
 - name: Housekeep /var filesystem when threshold exceeds 65%
   hosts: linux-test
   gather_facts: true
+  become: true
   vars:
     dir: "/var/crash"
     logfile: "/var/log/housekeeping-psd-task.log"
