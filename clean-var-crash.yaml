@@ -158,7 +158,7 @@
         usage_after: "{{ df_after.stdout_lines[-1].split()[-2] | regex_replace('%', '') | int }}"
       when:
         - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold | int
+        - usage_before | int > usage_threshold
         - eligible_files.matched | default(0) | int > 0
 
     - name: Evaluate post-cleanup result (Above threshold)
@@ -167,9 +167,9 @@
         housekeeping_result: "Usage remains above threshold after housekeeping"
       when:
         - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold | int
+        - usage_before | int > usage_threshold
         - eligible_files.matched | default(0) | int > 0
-        - usage_after | defined
+        - usage_after is defined
         - usage_after | int > usage_threshold | int
 
     - name: Evaluate post-cleanup result (Successful)
@@ -178,39 +178,7 @@
         housekeeping_result: "Housekeeping performed successfully"
       when:
         - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold | int
+        - usage_before | int > usage_threshold
         - eligible_files.matched | default(0) | int > 0
-        - usage_after | defined
+        - usage_after is defined
         - usage_after | int <= usage_threshold | int
-
-    - name: Write housekeeping summary to log file
-      ansible.builtin.lineinfile:
-        path: "{{ log_file }}"
-        create: true
-        owner: root
-        group: root
-        mode: "0640"
-        insertafter: EOF
-        line: >-
-          {{ ansible_date_time.iso8601 }} {{ task_name }} |
-          Usage before={{ usage_before | default('N/A') }}% |
-          Usage after={{ usage_after | default('N/A') }}% |
-          Deleted files={{ deleted_files | length }} |
-          Exit code={{ housekeeping_exit_code }} |
-          Result={{ housekeeping_result }}
-      when: usage_before is defined
-
-    - name: Display housekeeping summary
-      ansible.builtin.debug:
-        msg:
-          - "Target filesystem: {{ target_dir }}"
-          - "Usage before: {{ usage_before | default('N/A') }}%"
-          - "Usage after: {{ usage_after | default('N/A') }}%"
-          - "Files deleted: {{ deleted_files | length }}"
-          - "Result: {{ housekeeping_result }}"
-          - "Exit code: {{ housekeeping_exit_code }}"
-
-    - name: Return housekeeping exit code status
-      ansible.builtin.fail:
-        msg: "{{ housekeeping_result }} (exit code {{ housekeeping_exit_code }})"
-      when: housekeeping_exit_code not in [0, 1]
