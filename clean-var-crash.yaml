@@ -1,3 +1,4 @@
+```yaml
 ---
 - name: Housekeeping of /var filesystem on Linux systems
   hosts: linux-test
@@ -58,7 +59,6 @@
         argv:
           - df
           - -P
-          - --output=pcent
           - "{{ filesystem }}"
       register: df_before
       changed_when: false
@@ -68,15 +68,13 @@
       ansible.builtin.set_fact:
         usage_before: >-
           {{
-            df_before.stdout_lines[-1]
-            | trim
+            df_before.stdout_lines[-1].split()[-2]
             | regex_replace('%', '')
             | int
           }}
         usage_after: >-
           {{
-            df_before.stdout_lines[-1]
-            | trim
+            df_before.stdout_lines[-1].split()[-2]
             | regex_replace('%', '')
             | int
           }}
@@ -156,34 +154,32 @@
       loop: "{{ deleted_files }}"
       when: deleted_files | length > 0
 
-    # Run a new df command after the deletion task has completed.
+    # Run df again after deletion to obtain the current usage.
     - name: Get fresh filesystem usage after housekeeping
       ansible.builtin.command:
         argv:
           - df
           - -P
-          - --output=pcent
           - "{{ filesystem }}"
       register: df_after
       changed_when: false
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+        - (eligible_files.matched | default(0) | int) > 0
 
-    - name: Set final filesystem usage from fresh df output
+    - name: Set final filesystem usage
       ansible.builtin.set_fact:
         usage_after: >-
           {{
-            df_after.stdout_lines[-1]
-            | trim
+            df_after.stdout_lines[-1].split()[-2]
             | regex_replace('%', '')
             | int
           }}
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+        - (eligible_files.matched | default(0) | int) > 0
 
     - name: Report unsuccessful housekeeping
       ansible.builtin.set_fact:
@@ -193,7 +189,7 @@
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+        - (eligible_files.matched | default(0) | int) > 0
         - (usage_after | int) > (usage_threshold | int)
 
     - name: Report successful housekeeping
@@ -204,7 +200,7 @@
       when:
         - (housekeeping_exit_code | int) == 0
         - (usage_before | int) > (usage_threshold | int)
-        - (eligible_files.matched | int) > 0
+        - (eligible_files.matched | default(0) | int) > 0
         - (usage_after | int) <= (usage_threshold | int)
 
     - name: Write housekeeping summary to log
@@ -242,3 +238,4 @@
           {{ housekeeping_result }}
           (logical exit code {{ housekeeping_exit_code }})
       when: (housekeeping_exit_code | int) not in [0, 1]
+```
