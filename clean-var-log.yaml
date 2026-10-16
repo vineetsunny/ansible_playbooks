@@ -461,4 +461,3 @@
           usage after={{ usage_after_pct | default('N/A') }}%,
           exit code={{ housekeeping_exit_code }}.
       when: housekeeping_exit_code in [2, 21, 22]
-```
