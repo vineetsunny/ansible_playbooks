@@ -1,0 +1,290 @@
+---
+- name: Production /var/tmp housekeeping
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    housekeeping_dir: /var/tmp
+    housekeeping_threshold: 75
+    housekeeping_age_days: 15
+
+    housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
+    housekeeping_log_prefix: "Tanium-Housekeeping-PSD-Task-VAR"
+
+    # Set this variable in inventory or pass it using --extra-vars.
+    # Supported values: GB, UK, US
+    supported_regions:
+      - GB
+      - UK
+      - US
+
+    # File extensions eligible for deletion
+    housekeeping_patterns:
+      - "*.zip"
+      - "*.gz"
+      - "*.tar"
+      - "*.xz"
+      - "*.bz2"
+      - "*.tgz"
+
+  tasks:
+    - name: Initialize housekeeping result
+      ansible.builtin.set_fact:
+        housekeeping_result_code: 0
+        housekeeping_result_message: "Housekeeping not started"
+        housekeeping_usage_before: -1
+        housekeeping_usage_after: -1
+        housekeeping_deleted_count: 0
+
+    - name: Ensure housekeeping log exists
+      ansible.builtin.file:
+        path: "{{ housekeeping_log }}"
+        state: touch
+        owner: root
+        group: root
+        mode: "0640"
+        access_time: preserve
+        modification_time: preserve
+
+    - name: Validate region and execute housekeeping
+      block:
+
+        - name: Reject unsupported regions
+          ansible.builtin.assert:
+            that:
+              - region_code is defined
+              - region_code | string | upper in supported_regions
+            fail_msg: >-
+              EXIT CODE 23 - Unsupported or missing region.
+              Supported regions: GB, UK, US.
+            quiet: true
+
+        - name: Check whether housekeeping directory exists
+          ansible.builtin.stat:
+            path: "{{ housekeeping_dir }}"
+          register: housekeeping_dir_stat
+
+        - name: Stop if housekeeping directory is missing
+          ansible.builtin.assert:
+            that:
+              - housekeeping_dir_stat.stat.exists
+              - housekeeping_dir_stat.stat.isdir | default(false)
+            fail_msg: "EXIT CODE 21 - Directory not present: {{ housekeeping_dir }}"
+            quiet: true
+
+        - name: Identify the filesystem mounted on /var/tmp
+          ansible.builtin.command:
+            argv:
+              - findmnt
+              - --noheadings
+              - --output
+              - TARGET
+              - --target
+              - "{{ housekeeping_dir }}"
+          register: housekeeping_mount
+          changed_when: false
+          failed_when: false
+
+        - name: Verify /var/tmp is a dedicated mount point
+          ansible.builtin.assert:
+            that:
+              - housekeeping_mount.rc == 0
+              - housekeeping_mount.stdout | trim == housekeeping_dir
+            fail_msg: >-
+              EXIT CODE 22 - /var/tmp is not mounted as a separate
+              filesystem. Cleanup has been skipped.
+            quiet: true
+
+        - name: Read current filesystem utilization
+          ansible.builtin.command:
+            argv:
+              - df
+              - -P
+              - "{{ housekeeping_dir }}"
+          register: housekeeping_df_before
+          changed_when: false
+
+        - name: Extract utilization percentage
+          ansible.builtin.set_fact:
+            housekeeping_usage_before: >-
+              {{ housekeeping_df_before.stdout_lines[1].split()[4]
+                 | regex_replace('%', '') | int }}
+            housekeeping_usage_after: >-
+              {{ housekeeping_df_before.stdout_lines[1].split()[4]
+                 | regex_replace('%', '') | int }}
+
+        - name: Log current utilization
+          ansible.builtin.lineinfile:
+            path: "{{ housekeeping_log }}"
+            line: >-
+              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ housekeeping_log_prefix }}:
+              Disk usage before housekeeping =
+              {{ housekeeping_usage_before }}%
+            insertafter: EOF
+            create: true
+            owner: root
+            group: root
+            mode: "0640"
+
+        - name: Skip cleanup when utilization is within threshold
+          ansible.builtin.set_fact:
+            housekeeping_result_code: 0
+            housekeeping_result_message: >-
+              Housekeeping not required.
+              Current utilization: {{ housekeeping_usage_before }}%
+          when: housekeeping_usage_before | int <= housekeeping_threshold
+
+        - name: Find and delete eligible files on the same filesystem
+          ansible.builtin.shell: |
+            set -u
+
+            dir={{ housekeeping_dir | quote }}
+            age_days={{ housekeeping_age_days | int }}
+            log={{ housekeeping_log | quote }}
+
+            timestamp="$(date '+%b %d %T')"
+            prefix={{ housekeeping_log_prefix | quote }}
+
+            {
+              printf '%s %s: Starting cleanup of %s\n' \
+                "$timestamp" "$prefix" "$dir"
+
+              printf '%s %s: Utilization before cleanup: %s%%\n' \
+                "$timestamp" "$prefix" \
+                {{ housekeeping_usage_before | int }}
+            } >> "$log"
+
+            deleted_count=0
+
+            while IFS= read -r -d '' file; do
+              if rm -f -- "$file"; then
+                printf '%s\n' "$file" >> "$log"
+                deleted_count=$((deleted_count + 1))
+              else
+                printf '%s %s: ERROR: Failed to delete %s\n' \
+                  "$(date '+%b %d %T')" "$prefix" "$file" >> "$log"
+              fi
+            done < <(
+              find "$dir" -xdev -type f -mtime +"$age_days" \
+                \( \
+                  -name '*.zip' -o \
+                  -name '*.gz'  -o \
+                  -name '*.tar' -o \
+                  -name '*.xz'  -o \
+                  -name '*.bz2' -o \
+                  -name '*.tgz' \
+                \) -print0
+            )
+
+            printf '%s\n' "$deleted_count"
+          args:
+            executable: /bin/bash
+          register: housekeeping_cleanup
+          changed_when: >-
+            housekeeping_cleanup.stdout | trim | int > 0
+          when: housekeeping_usage_before | int > housekeeping_threshold
+
+        - name: Record number of deleted files
+          ansible.builtin.set_fact:
+            housekeeping_deleted_count: >-
+              {{ housekeeping_cleanup.stdout | trim | int }}
+          when: housekeeping_usage_before | int > housekeeping_threshold
+
+        - name: Recheck filesystem utilization after cleanup
+          ansible.builtin.command:
+            argv:
+              - df
+              - -P
+              - "{{ housekeeping_dir }}"
+          register: housekeeping_df_after
+          changed_when: false
+          when: housekeeping_usage_before | int > housekeeping_threshold
+
+        - name: Extract post-cleanup utilization
+          ansible.builtin.set_fact:
+            housekeeping_usage_after: >-
+              {{ housekeeping_df_after.stdout_lines[1].split()[4]
+                 | regex_replace('%', '') | int }}
+          when: housekeeping_usage_before | int > housekeeping_threshold
+
+        - name: Determine housekeeping result
+          ansible.builtin.set_fact:
+            housekeeping_result_code: >-
+              {{ 3 if housekeeping_deleted_count | int == 0
+                 else (2 if housekeeping_usage_after | int >
+                 housekeeping_threshold else 1) }}
+            housekeeping_result_message: >-
+              {{ 'NO_FILES_FOUND - No eligible files found; PSD attention required'
+                 if housekeeping_deleted_count | int == 0
+                 else ('NO_SUCCESS - Usage remains above threshold; PSD attention required'
+                 if housekeeping_usage_after | int > housekeeping_threshold
+                 else 'SUCCESS - Housekeeping performed successfully') }}
+          when: housekeeping_usage_before | int > housekeeping_threshold
+
+        - name: Append final housekeeping summary to log
+          ansible.builtin.lineinfile:
+            path: "{{ housekeeping_log }}"
+            line: >-
+              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ housekeeping_log_prefix }}:
+              Usage before={{ housekeeping_usage_before }}%,
+              Usage after={{ housekeeping_usage_after }}%,
+              Files deleted={{ housekeeping_deleted_count }},
+              Result code={{ housekeeping_result_code }},
+              Result={{ housekeeping_result_message }}
+            insertafter: EOF
+            create: true
+            owner: root
+            group: root
+            mode: "0640"
+
+      rescue:
+        - name: Capture validation or execution failure
+          ansible.builtin.set_fact:
+            housekeeping_result_code: >-
+              {{ 23 if region_code is not defined or
+                 (region_code | string | upper not in supported_regions)
+                 else (21 if not (housekeeping_dir_stat.stat.exists
+                 | default(false)) else (22 if
+                 (housekeeping_mount.rc | default(1)) != 0 or
+                 (housekeeping_mount.stdout | default('') | trim
+                 != housekeeping_dir) else 2)) }}
+            housekeeping_result_message: >-
+              Housekeeping failed validation or execution.
+              Review the Ansible task output and housekeeping log.
+
+        - name: Log housekeeping failure
+          ansible.builtin.lineinfile:
+            path: "{{ housekeeping_log }}"
+            line: >-
+              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ housekeeping_log_prefix }}:
+              ERROR - {{ housekeeping_result_message }}
+            insertafter: EOF
+            create: true
+            owner: root
+            group: root
+            mode: "0640"
+
+    - name: Display final housekeeping report
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Region: {{ region_code | default('NOT_DEFINED') }}"
+          - "Filesystem: {{ housekeeping_dir }}"
+          - "Usage before: {{ housekeeping_usage_before }}%"
+          - "Usage after: {{ housekeeping_usage_after }}%"
+          - "Files deleted: {{ housekeeping_deleted_count }}"
+          - "Result code: {{ housekeeping_result_code }}"
+          - "Result: {{ housekeeping_result_message }}"
+          - "Log file: {{ housekeeping_log }}"
+
+    - name: Mark housekeeping attention or validation failure
+      ansible.builtin.fail:
+        msg: >-
+          Housekeeping requires attention.
+          Result code={{ housekeeping_result_code }}.
+          {{ housekeeping_result_message }}
+      when: housekeeping_result_code | int not in [0, 1]
