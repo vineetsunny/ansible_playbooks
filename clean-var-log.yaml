@@ -100,83 +100,54 @@
       ansible.builtin.command:
         argv:
           - df
-          - -P
-          - --output=size,used,avail,pcent,target
-          - --
+          - -h
           - "{{ filesystem_path }}"
       register: var_log_df_before
       changed_when: false
       failed_when: false
 
-    - name: Validate initial filesystem utilization output
-      ansible.builtin.set_fact:
-        housekeeping_exit_code: 22
-        housekeeping_result: >-
-          FILESYSTEM_CHECK_FAILED - Unable to retrieve
-          filesystem utilization for {{ filesystem_path }}
-      when: >-
-        var_log_df_before.rc != 0 or
-        (var_log_df_before.stdout_lines | default([]) | length) < 2
-
-    - name: Display initial filesystem utilization failure
+    - name: Display current filesystem utilization
       ansible.builtin.debug:
         msg:
-          - "Filesystem path: {{ filesystem_path }}"
-          - "Command error: {{ var_log_df_before.stderr | default('No error details returned') }}"
-          - "Result: {{ housekeeping_result }}"
-          - "Exit code: {{ housekeeping_exit_code }}"
-      when: housekeeping_exit_code == 22
+          - "========== INITIAL FILESYSTEM UTILIZATION =========="
+          - "{{ var_log_df_before.stdout }}"
+          - "===================================================="
 
-    - name: Stop processing when initial utilization cannot be read
-      ansible.builtin.meta: end_host
-      when: housekeeping_exit_code == 22
+    - name: Validate initial filesystem utilization output
+      ansible.builtin.assert:
+        that:
+          - var_log_df_before.rc == 0
+          - var_log_df_before.stdout_lines | length >= 2
+        fail_msg: >-
+          Unable to retrieve filesystem utilization for
+          {{ filesystem_path }}.
+          Command error: {{ var_log_df_before.stderr | default('Unknown error') }}
 
     - name: Record initial filesystem utilization
       ansible.builtin.set_fact:
         usage_before_pct: >-
           {{
-            var_log_df_before.stdout_lines[1].split()[3]
+            var_log_df_before.stdout_lines[1].split()[4]
             | regex_replace('%', '')
             | int
           }}
-        filesystem_size_kb: >-
-          {{ var_log_df_before.stdout_lines[1].split()[0] }}
-        filesystem_used_kb: >-
-          {{ var_log_df_before.stdout_lines[1].split()[1] }}
-        filesystem_available_kb: >-
-          {{ var_log_df_before.stdout_lines[1].split()[2] }}
+        filesystem_name: "{{ var_log_df_before.stdout_lines[1].split()[0] }}"
+        filesystem_size: "{{ var_log_df_before.stdout_lines[1].split()[1] }}"
+        filesystem_used: "{{ var_log_df_before.stdout_lines[1].split()[2] }}"
+        filesystem_available: "{{ var_log_df_before.stdout_lines[1].split()[3] }}"
+        filesystem_mount: "{{ var_log_df_before.stdout_lines[1].split()[5] }}"
 
-    - name: Display current /var/log filesystem utilization
+    - name: Display parsed filesystem utilization
       ansible.builtin.debug:
         msg:
-          - "========== INITIAL FILESYSTEM UTILIZATION =========="
-          - "Filesystem path: {{ filesystem_path }}"
-          - "Filesystem mount: {{ var_mount.stdout | trim }}"
-          - "Filesystem size: {{ filesystem_size_kb }} KB"
-          - "Space used: {{ filesystem_used_kb }} KB"
-          - "Space available: {{ filesystem_available_kb }} KB"
+          - "Filesystem: {{ filesystem_name }}"
+          - "Mount point: {{ filesystem_mount }}"
+          - "Filesystem path checked: {{ filesystem_path }}"
+          - "Total size: {{ filesystem_size }}"
+          - "Used space: {{ filesystem_used }}"
+          - "Available space: {{ filesystem_available }}"
           - "Current utilization: {{ usage_before_pct }}%"
           - "Housekeeping threshold: {{ housekeeping_threshold }}%"
-          - "===================================================="
-
-    - name: Determine whether housekeeping is required
-      ansible.builtin.set_fact:
-        cleanup_required: "{{ (usage_before_pct | int) > (housekeeping_threshold | int) }}"
-        housekeeping_result: >-
-          {{
-            'HOUSEKEEPING_REQUIRED - Filesystem utilization exceeds threshold'
-            if (usage_before_pct | int) > (housekeeping_threshold | int)
-            else 'HOUSEKEEPING_NOT_REQUIRED - Usage is within threshold'
-          }}
-
-    - name: Display housekeeping decision
-      ansible.builtin.debug:
-        msg: >-
-          {{
-            'Utilization is above the threshold. Eligible files will be evaluated for compression.'
-            if cleanup_required | bool
-            else 'Utilization is within the threshold. No housekeeping will be performed.'
-          }}
 
     # -------------------------------------------------------
     # 4. Find eligible files only when required
