@@ -16,11 +16,14 @@
     - name: Initialize housekeeping result
       ansible.builtin.set_fact:
         housekeeping_exit_code: 0
-        housekeeping_result: ""
+        housekeeping_result: "INITIALIZED"
         housekeeping_files: []
+        compression_failed_files: []
+        cleanup_required: false
 
-    # Region validation temporarily disabled.
-    # Re-enable when server region information is available.
+    # -------------------------------------------------------
+    # 1. Validate the housekeeping directory
+    # -------------------------------------------------------
 
     - name: Check whether /var/log directory exists
       ansible.builtin.stat:
@@ -30,13 +33,26 @@
     - name: Report missing /var/log directory
       ansible.builtin.set_fact:
         housekeeping_exit_code: 21
-        housekeeping_result: "DIRECTORY_NOT_PRESENT - /var/log does not exist"
+        housekeeping_result: >-
+          DIRECTORY_NOT_PRESENT - {{ housekeeping_dir }} does not exist
       when: not var_log_stat.stat.exists or
             not var_log_stat.stat.isdir
+
+    - name: Display directory validation failure
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem path: {{ filesystem_path }}"
+          - "Result: {{ housekeeping_result }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
+      when: housekeeping_exit_code == 21
 
     - name: Stop processing when directory is missing
       ansible.builtin.meta: end_host
       when: housekeeping_exit_code == 21
+
+    # -------------------------------------------------------
+    # 2. Validate the filesystem
+    # -------------------------------------------------------
 
     - name: Check filesystem containing /var/log
       ansible.builtin.command:
@@ -51,52 +67,120 @@
       changed_when: false
       failed_when: false
 
-    - name: Check filesystem mount status
+    - name: Report filesystem check failure
       ansible.builtin.set_fact:
         housekeeping_exit_code: 22
-        housekeeping_result: "FILESYSTEM_NOT_MOUNTED - Filesystem check failed"
+        housekeeping_result: >-
+          FILESYSTEM_CHECK_FAILED - Unable to identify the
+          filesystem containing {{ filesystem_path }}
       when: var_mount.rc != 0 or
             (var_mount.stdout | trim | length == 0)
 
-    - name: Stop processing when filesystem is not mounted
+    - name: Display filesystem validation failure
+      ansible.builtin.debug:
+        msg:
+          - "Filesystem path: {{ filesystem_path }}"
+          - "Result: {{ housekeeping_result }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
+      when: housekeeping_exit_code == 22
+
+    - name: Stop processing when filesystem check fails
       ansible.builtin.meta: end_host
       when: housekeeping_exit_code == 22
+
+    - name: Display identified filesystem mount
+      ansible.builtin.debug:
+        msg: "Filesystem mount containing {{ filesystem_path }}: {{ var_mount.stdout | trim }}"
+
+    # -------------------------------------------------------
+    # 3. Capture and display initial utilization
+    # -------------------------------------------------------
 
     - name: Get filesystem utilization before housekeeping
       ansible.builtin.command:
         argv:
           - df
           - -P
+          - --output=size,used,avail,pcent,target
+          - --
           - "{{ filesystem_path }}"
       register: var_log_df_before
       changed_when: false
+      failed_when: false
 
-    - name: Display current /var/log filesystem utilization
+    - name: Validate initial filesystem utilization output
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 22
+        housekeeping_result: >-
+          FILESYSTEM_CHECK_FAILED - Unable to retrieve
+          filesystem utilization for {{ filesystem_path }}
+      when: >-
+        var_log_df_before.rc != 0 or
+        (var_log_df_before.stdout_lines | default([]) | length) < 2
+
+    - name: Display initial filesystem utilization failure
       ansible.builtin.debug:
-        msg: "{{ var_log_df_before.stdout }}"
+        msg:
+          - "Filesystem path: {{ filesystem_path }}"
+          - "Command error: {{ var_log_df_before.stderr | default('No error details returned') }}"
+          - "Result: {{ housekeeping_result }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
+      when: housekeeping_exit_code == 22
+
+    - name: Stop processing when initial utilization cannot be read
+      ansible.builtin.meta: end_host
+      when: housekeeping_exit_code == 22
 
     - name: Record initial filesystem utilization
       ansible.builtin.set_fact:
         usage_before_pct: >-
           {{
-            var_log_df_before.stdout_lines[1].split()[4]
+            var_log_df_before.stdout_lines[1].split()[3]
             | regex_replace('%', '')
             | int
           }}
+        filesystem_size_kb: >-
+          {{ var_log_df_before.stdout_lines[1].split()[0] }}
+        filesystem_used_kb: >-
+          {{ var_log_df_before.stdout_lines[1].split()[1] }}
+        filesystem_available_kb: >-
+          {{ var_log_df_before.stdout_lines[1].split()[2] }}
 
-    - name: Display current utilization percentage
+    - name: Display current /var/log filesystem utilization
       ansible.builtin.debug:
-        msg: "Current /var/log filesystem utilization: {{ usage_before_pct }}%"
+        msg:
+          - "========== INITIAL FILESYSTEM UTILIZATION =========="
+          - "Filesystem path: {{ filesystem_path }}"
+          - "Filesystem mount: {{ var_mount.stdout | trim }}"
+          - "Filesystem size: {{ filesystem_size_kb }} KB"
+          - "Space used: {{ filesystem_used_kb }} KB"
+          - "Space available: {{ filesystem_available_kb }} KB"
+          - "Current utilization: {{ usage_before_pct }}%"
+          - "Housekeeping threshold: {{ housekeeping_threshold }}%"
+          - "===================================================="
 
-    - name: Skip housekeeping when usage is within threshold
+    - name: Determine whether housekeeping is required
       ansible.builtin.set_fact:
-        housekeeping_exit_code: 0
-        housekeeping_result: "HOUSEKEEPING_NOT_REQUIRED - Usage is within threshold"
-      when: usage_before_pct | int <= housekeeping_threshold
+        cleanup_required: "{{ (usage_before_pct | int) > (housekeeping_threshold | int) }}"
+        housekeeping_result: >-
+          {{
+            'HOUSEKEEPING_REQUIRED - Filesystem utilization exceeds threshold'
+            if (usage_before_pct | int) > (housekeeping_threshold | int)
+            else 'HOUSEKEEPING_NOT_REQUIRED - Usage is within threshold'
+          }}
 
-    - name: Stop when housekeeping is not required
-      ansible.builtin.meta: end_host
-      when: housekeeping_exit_code == 0
+    - name: Display housekeeping decision
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Utilization is above the threshold. Eligible files will be evaluated for compression.'
+            if cleanup_required | bool
+            else 'Utilization is within the threshold. No housekeeping will be performed.'
+          }}
+
+    # -------------------------------------------------------
+    # 4. Find eligible files only when required
+    # -------------------------------------------------------
 
     - name: Find eligible rotated system log files
       ansible.builtin.find:
@@ -117,6 +201,7 @@
           - "wtmp.*"
         use_regex: false
       register: rotated_logs
+      when: cleanup_required | bool
 
     - name: Find eligible system activity files
       ansible.builtin.find:
@@ -130,39 +215,42 @@
           - "sa*"
         use_regex: false
       register: sa_logs
+      when: cleanup_required | bool
       failed_when: false
 
     - name: Combine eligible files
       ansible.builtin.set_fact:
         housekeeping_files: >-
           {{
-            (rotated_logs.files | default([])) +
+            (rotated_logs.files | default([]))
+            +
             (sa_logs.files | default([]))
           }}
+      when: cleanup_required | bool
+
+    - name: Display eligible files
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            housekeeping_files | map(attribute='path') | list
+            if housekeeping_files | length > 0
+            else ['No eligible files found']
+          }}
+      when: cleanup_required | bool
 
     - name: Report when no eligible files are found
       ansible.builtin.set_fact:
         housekeeping_exit_code: 3
-        housekeeping_result: "NO_FILES_FOUND - No eligible files found; PSD attention required"
-      when: housekeeping_files | length == 0
+        housekeeping_result: >-
+          NO_FILES_FOUND - No eligible files found;
+          PSD attention required
+      when:
+        - cleanup_required | bool
+        - housekeeping_files | length == 0
 
-    - name: Log no eligible files
-      ansible.builtin.lineinfile:
-        path: "{{ housekeeping_log }}"
-        create: true
-        mode: "0640"
-        owner: root
-        group: root
-        line: >-
-          {{ ansible_date_time.date }}
-          {{ housekeeping_tag }}
-          Disk Usage: {{ usage_before_pct }}%,
-          Result: {{ housekeeping_result }}
-      when: housekeeping_exit_code == 3
-
-    - name: Stop when no eligible files are found
-      ansible.builtin.meta: end_host
-      when: housekeeping_exit_code == 3
+    # -------------------------------------------------------
+    # 5. Compress eligible files
+    # -------------------------------------------------------
 
     - name: Compress eligible log files
       ansible.builtin.command:
@@ -174,79 +262,175 @@
       loop_control:
         label: "{{ item.path }}"
       register: compression_result
+      failed_when: false
+      when:
+        - cleanup_required | bool
+        - housekeeping_files | length > 0
+
+    - name: Identify compression failures
+      ansible.builtin.set_fact:
+        compression_failed_files: >-
+          {{
+            (compression_result.results | default([]))
+            | rejectattr('rc', 'equalto', 0)
+            | map(attribute='item.path')
+            | list
+          }}
+      when:
+        - cleanup_required | bool
+        - housekeeping_files | length > 0
+
+    - name: Display compression results
+      ansible.builtin.debug:
+        msg:
+          - "Files evaluated for compression: {{ housekeeping_files | length }}"
+          - "Compression failures: {{ compression_failed_files | length }}"
+          - "Failed file paths: {{ compression_failed_files }}"
+      when:
+        - cleanup_required | bool
+        - housekeeping_files | length > 0
+
+    # -------------------------------------------------------
+    # 6. Capture final utilization after housekeeping
+    # -------------------------------------------------------
 
     - name: Get filesystem utilization after housekeeping
       ansible.builtin.command:
         argv:
           - df
           - -P
+          - --output=size,used,avail,pcent,target
+          - --
           - "{{ filesystem_path }}"
       register: var_log_df_after
       changed_when: false
+      failed_when: false
+      when: cleanup_required | bool
 
-    - name: Display filesystem utilization after housekeeping
-      ansible.builtin.debug:
-        msg: "{{ var_log_df_after.stdout }}"
+    - name: Validate final filesystem utilization output
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 22
+        housekeeping_result: >-
+          FILESYSTEM_CHECK_FAILED - Unable to retrieve
+          filesystem utilization after housekeeping
+      when:
+        - cleanup_required | bool
+        - >-
+          var_log_df_after.rc != 0 or
+          (var_log_df_after.stdout_lines | default([]) | length) < 2
 
     - name: Record final filesystem utilization
       ansible.builtin.set_fact:
         usage_after_pct: >-
           {{
-            var_log_df_after.stdout_lines[1].split()[4]
+            var_log_df_after.stdout_lines[1].split()[3]
             | regex_replace('%', '')
             | int
           }}
+        filesystem_used_after_kb: >-
+          {{ var_log_df_after.stdout_lines[1].split()[1] }}
+        filesystem_available_after_kb: >-
+          {{ var_log_df_after.stdout_lines[1].split()[2] }}
+      when:
+        - cleanup_required | bool
+        - housekeeping_exit_code != 22
 
-    - name: Display before and after utilization
+    - name: Display final filesystem utilization
       ansible.builtin.debug:
         msg:
-          - "Usage before housekeeping: {{ usage_before_pct }}%"
-          - "Usage after housekeeping: {{ usage_after_pct }}%"
+          - "========== FINAL FILESYSTEM UTILIZATION ============"
+          - "Filesystem path: {{ filesystem_path }}"
+          - "Utilization before housekeeping: {{ usage_before_pct }}%"
+          - "Utilization after housekeeping: {{ usage_after_pct }}%"
+          - "Space used after housekeeping: {{ filesystem_used_after_kb }} KB"
+          - "Space available after housekeeping: {{ filesystem_available_after_kb }} KB"
+          - "Change in utilization: {{ (usage_before_pct | int) - (usage_after_pct | int) }} percentage points"
+          - "==================================================="
+      when:
+        - cleanup_required | bool
+        - housekeeping_exit_code != 22
 
-    - name: Determine housekeeping outcome
+    # -------------------------------------------------------
+    # 7. Determine final outcome
+    # -------------------------------------------------------
+
+    - name: Determine final housekeeping outcome
       ansible.builtin.set_fact:
         housekeeping_exit_code: >-
           {{
-            2 if (usage_after_pct | int > housekeeping_threshold)
+            2 if (usage_after_pct | int > housekeeping_threshold | int)
             else 1
           }}
         housekeeping_result: >-
           {{
             'NO_SUCCESS - Needs PSD Attention'
-            if (usage_after_pct | int > housekeeping_threshold)
+            if (usage_after_pct | int > housekeeping_threshold | int)
             else 'SUCCESS - Housekeeping Performed'
           }}
+      when:
+        - cleanup_required | bool
+        - housekeeping_exit_code != 22
+        - housekeeping_files | length > 0
 
-    - name: Log housekeeping details
-      ansible.builtin.shell: |
-        {
-          echo "Files Processed - {{ ansible_date_time.date }}"
-          echo "========================================"
-          {% for file in housekeeping_files %}
-          echo "{{ file.path }} -> {{ file.path }}.gz"
-          {% endfor %}
-          echo "========================================"
-          echo "{{ housekeeping_tag }}: Usage Before: {{ usage_before_pct }}%, Usage After: {{ usage_after_pct }}%, Result: {{ housekeeping_result }}, Exit Code: {{ housekeeping_exit_code }}"
-        } >> "{{ housekeeping_log }}"
-      args:
-        executable: /bin/bash
-      changed_when: false
+    - name: Report compression failure in final outcome
+      ansible.builtin.set_fact:
+        housekeeping_exit_code: 2
+        housekeeping_result: >-
+          NO_SUCCESS - One or more files failed compression;
+          PSD attention required
+      when:
+        - cleanup_required | bool
+        - housekeeping_files | length > 0
+        - compression_failed_files | length > 0
+        - housekeeping_exit_code != 22
+
+    # -------------------------------------------------------
+    # 8. Log the outcome
+    # -------------------------------------------------------
+
+    - name: Log final housekeeping summary
+      ansible.builtin.lineinfile:
+        path: "{{ housekeeping_log }}"
+        create: true
+        mode: "0640"
+        owner: root
+        group: root
+        line: >-
+          {{ ansible_date_time.iso8601 }}
+          {{ housekeeping_tag }}
+          Filesystem={{ filesystem_path }}
+          UsageBefore={{ usage_before_pct }}%
+          UsageAfter={{ usage_after_pct | default('N/A') }}%
+          FilesProcessed={{ housekeeping_files | length }}
+          CompressionFailures={{ compression_failed_files | length }}
+          Result={{ housekeeping_result }}
+          ExitCode={{ housekeeping_exit_code }}
+      when: housekeeping_exit_code not in [21, 22]
+
+    # -------------------------------------------------------
+    # 9. Always display the final result
+    # -------------------------------------------------------
 
     - name: Display final housekeeping result
       ansible.builtin.debug:
         msg:
+          - "========== HOUSEKEEPING SUMMARY ===================="
           - "Filesystem: {{ filesystem_path }}"
-          - "Usage before housekeeping: {{ usage_before_pct }}%"
-          - "Usage after housekeeping: {{ usage_after_pct }}%"
-          - "Files processed: {{ housekeeping_files | length }}"
+          - "Initial utilization: {{ usage_before_pct }}%"
+          - "Threshold: {{ housekeeping_threshold }}%"
+          - "Housekeeping required: {{ cleanup_required }}"
+          - "Final utilization: {{ usage_after_pct | default('Not measured - housekeeping skipped or check failed') }}{% if usage_after_pct is defined %}%{% endif %}"
+          - "Eligible files: {{ housekeeping_files | length }}"
+          - "Compression failures: {{ compression_failed_files | length }}"
           - "Result: {{ housekeeping_result }}"
           - "Exit code: {{ housekeeping_exit_code }}"
+          - "==================================================="
 
     - name: Return housekeeping outcome
       ansible.builtin.fail:
         msg: >-
           {{ housekeeping_result }}.
           Usage before={{ usage_before_pct }}%,
-          usage after={{ usage_after_pct }}%,
+          usage after={{ usage_after_pct | default('N/A') }}%,
           exit code={{ housekeeping_exit_code }}.
-      when: housekeeping_exit_code == 2
+      when: housekeeping_exit_code in [2, 21, 22]
