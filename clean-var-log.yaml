@@ -1,3 +1,16 @@
+## The intention of this script is to housekeep /var file system when it reaches 65% and before it turns into an Incident.
+## The script focuses on compressing files under /var/log which are over 50M in size and older than 2 days.
+## This script is only supposed to run on GB/UK/US servers. Smaller regions / HRC servers are not remediated with this script.
+
+##----Exit Codes-----##
+## 0 - Housekeeping Not Required, under threshold 
+## 21 - Directory not Present 
+## 22 - File System Not Mounted 
+## 23 - Region not supported
+## 3 - No Files Found with Criteria 
+## 2 - Still Same after Housekeeping 
+## 1 - Housekeeping Performed
+
 ---
 - name: Clean-var-log housekeeping
   hosts: all
