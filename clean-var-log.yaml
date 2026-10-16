@@ -11,6 +11,10 @@
     housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
     housekeeping_tag: Tanium-Housekeeping-PSD-Task-VAR-LOG
 
+    # Compression timeout settings
+    compression_timeout_seconds: 600
+    compression_async_timeout: 660
+
   tasks:
 
     - name: Initialize housekeeping result
@@ -142,51 +146,130 @@
         - cleanup_required | bool
         - eligible_files | length == 0
 
-    - name: Compress eligible files
-      ansible.builtin.command:
-        argv:
-          - gzip
-          - --
-          - "{{ item.path }}"
+    # ---------------------------------------------------------
+    # COMPRESS FILES
+    # - Never overwrite an existing archive.
+    # - Add _1, _2, etc. when the archive name already exists.
+    # - Preserve the source until compression succeeds.
+    # - Record progress and errors in the remote log.
+    # ---------------------------------------------------------
+
+    - name: Compress eligible files without overwriting archives
+      ansible.builtin.shell: |
+        set -u
+
+        src={{ item.path | quote }}
+        log_file={{ housekeeping_log | quote }}
+        timeout_seconds={{ compression_timeout_seconds | int }}
+
+        log_message() {
+          printf '%s | %s\n' "$(date '+%F %T')" "$*" \
+            | tee -a "$log_file"
+        }
+
+        log_message "START compression: $src"
+
+        if [ ! -f "$src" ]; then
+          log_message "ERROR: Source file does not exist: $src"
+          exit 20
+        fi
+
+        # Create a temporary archive in the source directory.
+        tmp=$(mktemp "${src}.gzip-tmp.XXXXXX") || {
+          log_message "ERROR: Cannot create temporary file for $src"
+          exit 21
+        }
+
+        trap 'rm -f -- "$tmp"' EXIT
+
+        # Compress to the temporary file; keep the source intact.
+        timeout --signal=TERM --kill-after=30s \
+          "${timeout_seconds}s" gzip -c -- "$src" > "$tmp" 2>> "$log_file"
+        gzip_rc=$?
+
+        if [ "$gzip_rc" -ne 0 ]; then
+          log_message "ERROR: gzip failed or timed out: $src; rc=$gzip_rc"
+          exit "$gzip_rc"
+        fi
+
+        # Atomically claim an available destination name.
+        dest="${src}.gz"
+        suffix=1
+
+        while ! ln -- "$tmp" "$dest" 2>/dev/null; do
+          if [ -e "$dest" ] || [ -L "$dest" ]; then
+            dest="${src}_${suffix}.gz"
+            suffix=$((suffix + 1))
+          else
+            log_message "ERROR: Cannot create archive: $dest"
+            exit 22
+          fi
+        done
+
+        log_message "ARCHIVE CREATED: $dest"
+
+        # Remove the source only after successful archive creation.
+        if ! rm -- "$src"; then
+          log_message "ERROR: Archive exists but source removal failed: $src"
+          exit 23
+        fi
+
+        log_message "SUCCESS: $src compressed to $dest"
+        exit 0
+      args:
+        executable: /bin/bash
       loop: "{{ eligible_files }}"
       loop_control:
         label: "{{ item.path }}"
       register: compression_result
+      async: "{{ compression_async_timeout }}"
+      poll: 5
       failed_when: false
       when:
         - cleanup_required | bool
         - eligible_files | length > 0
 
+    # ---------------------------------------------------------
+    # COMPRESSION ERROR REPORTING
+    # ---------------------------------------------------------
+
+    - name: Reset compression failure list
+      ansible.builtin.set_fact:
+        compression_failed_files: []
+
     - name: Identify compression failures
       ansible.builtin.set_fact:
         compression_failed_files: >-
-          {{
-            (compression_result.results | default([]))
-            | rejectattr('rc', 'defined')
-            | map(attribute='item.path')
-            | list
-            +
-            (
-              (compression_result.results | default([]))
-              | selectattr('rc', 'defined')
-              | rejectattr('rc', 'equalto', 0)
-              | map(attribute='item.path')
-              | list
-            )
-          }}
+          {{ compression_failed_files + [item.item.path | default('Unknown file')] }}
+      loop: "{{ compression_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.path | default('Unknown file') }}"
+      when: >-
+        (item.rc is not defined)
+        or ((item.rc | default(1) | int) != 0)
+        or (item.failed | default(false) | bool)
+
+    - name: Display detailed compression diagnostics
+      ansible.builtin.debug:
+        msg:
+          - "File: {{ item.item.path | default('Unknown') }}"
+          - "Return code: {{ item.rc | default('Not available') }}"
+          - "Standard output: {{ item.stdout | default('No output') }}"
+          - "Standard error: {{ item.stderr | default('See remote housekeeping log') }}"
+          - "Task message: {{ item.msg | default('No additional message') }}"
+      loop: "{{ compression_result.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.path | default('Unknown file') }}"
 
     - name: Display compression summary
       ansible.builtin.debug:
         msg:
           - "Eligible files: {{ eligible_files | length }}"
-          - >-
-            Compression failures:
-            {{ compression_failed_files | length }}
+          - "Compression failures: {{ compression_failed_files | length }}"
           - "Failed files: {{ compression_failed_files }}"
 
     # ---------------------------------------------------------
     # POST-HOUSEKEEPING UTILIZATION CHECK
-    # This section must run after the compression task.
     # ---------------------------------------------------------
 
     - name: Flush pending filesystem writes
