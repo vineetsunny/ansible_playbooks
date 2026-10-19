@@ -1,3 +1,43 @@
+# =============================================================================
+# Playbook Name : clean-var-tmp.yml
+# Description   : Performs automated housekeeping of the /var/tmp filesystem
+#                 on Linux systems when filesystem utilization reaches 75%.
+#
+# Purpose       : Prevents filesystem capacity issues by deleting eligible
+#                 ZIP and TAR archive files older than 15 days.
+#
+# Scope         : GB, UK, and US Linux servers
+# Target FS     : /var/tmp
+# Threshold     : 75% filesystem utilization
+# File Age      : Older than 15 days
+# File Types    : ZIP and TAR archives
+# Log File      : /var/log/housekeeping-psd-task.log
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Linux server.
+#   - Privilege escalation (become: true).
+#   - Target filesystem mounted and accessible.
+#   - Appropriate permissions to identify and delete eligible files.
+#   - Region validation to ensure only GB, UK, and US servers are remediated.
+#
+# Execution     : ansible-playbook -i inventory clean-var-tmp.yml
+#
+# Exit Codes:
+#   0  - Housekeeping not required; utilization is below the threshold.
+#   1  - Housekeeping performed.
+#   2  - Filesystem utilization remains unchanged after housekeeping.
+#   3  - No eligible files found for housekeeping.
+#   21 - Target directory not present.
+#   22 - Target filesystem not mounted.
+#   23 - Region not supported.
+#
+# Important     : Files matching the configured cleanup criteria are deleted
+#                 permanently. Validate the file selection criteria and
+#                 filesystem utilization before production execution.
+#                 Smaller regions and HRC servers are excluded from remediation.
+#
+# Version       : 1.0
+# =============================================================================
 
 ---
 - name: Production housekeeping for /var/tmp
