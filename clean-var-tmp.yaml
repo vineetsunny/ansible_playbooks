@@ -12,7 +12,6 @@
     housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
     housekeeping_log_prefix: "Tanium-Housekeeping-PSD-Task-VAR"
 
-    # Define region_code in inventory or pass it using --extra-vars.
     supported_regions:
       - GB
       - UK
@@ -122,6 +121,13 @@
               {{ housekeeping_df_before.stdout_lines[1].split()[4]
                  | regex_replace('%', '') | int }}
 
+        - name: Display initial utilization
+          ansible.builtin.debug:
+            msg: >-
+              Filesystem utilization before cleanup:
+              {{ housekeeping_usage_before }}%.
+              Cleanup threshold: {{ housekeeping_threshold }}%.
+
         - name: Log initial utilization
           ansible.builtin.lineinfile:
             path: "{{ housekeeping_log }}"
@@ -143,7 +149,7 @@
               Housekeeping not required.
               Utilization is {{ housekeeping_usage_before }}%.
           when: housekeeping_usage_before | int < housekeeping_threshold
-          
+
         - name: Find and delete eligible archive files
           ansible.builtin.shell: |
             set -u
@@ -207,21 +213,71 @@
                  | regex_replace('FAILED=', '') | int }}
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
-        - name: Read filesystem utilization after housekeeping
+        - name: Flush pending filesystem operations
           ansible.builtin.command:
             argv:
-              - df
-              - -P
-              - "{{ housekeeping_dir }}"
+              - sync
+          changed_when: false
+          when: housekeeping_usage_before | int >= housekeeping_threshold
+
+        - name: Wait for filesystem utilization to stabilize
+          ansible.builtin.shell: |
+            set -u
+
+            dir={{ housekeeping_dir | quote }}
+            previous=""
+            stable_count=0
+            usage=""
+
+            for attempt in {1..12}; do
+              usage=$(df -P "$dir" | awk 'NR==2 {
+                gsub(/%/, "", $5)
+                print $5
+              }')
+
+              if [[ -z "$usage" ]]; then
+                echo "ERROR: Unable to read filesystem utilization" >&2
+                exit 1
+              fi
+
+              echo "Check ${attempt}: filesystem usage=${usage}%"
+
+              if [[ "$usage" == "$previous" ]]; then
+                stable_count=$((stable_count + 1))
+              else
+                stable_count=0
+              fi
+
+              if ((stable_count >= 2)); then
+                echo "Usage stabilized at ${usage}%"
+                break
+              fi
+
+              previous="$usage"
+              sleep 10
+            done
+
+            printf 'FINAL_USAGE=%s\n' "$usage"
+          args:
+            executable: /bin/bash
           register: housekeeping_df_after
           changed_when: false
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
-        - name: Extract final utilization
+        - name: Extract stabilized utilization
           ansible.builtin.set_fact:
             housekeeping_usage_after: >-
-              {{ housekeeping_df_after.stdout_lines[1].split()[4]
-                 | regex_replace('%', '') | int }}
+              {{ housekeeping_df_after.stdout_lines
+                 | select('match', '^FINAL_USAGE=')
+                 | list | last
+                 | regex_replace('^FINAL_USAGE=', '') | int }}
+          when: housekeeping_usage_before | int >= housekeeping_threshold
+
+        - name: Display stabilized utilization
+          ansible.builtin.debug:
+            msg: >-
+              Filesystem utilization after cleanup and stabilization:
+              {{ housekeeping_usage_after }}%.
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
         - name: Determine housekeeping result
@@ -229,18 +285,16 @@
             housekeeping_result_code: >-
               {{ 3 if housekeeping_found_count | int == 0
                  else (2 if housekeeping_failed_count | int > 0
-                 or housekeeping_usage_after | int ==
-                    housekeeping_usage_before | int else 1) }}
+                 else (2 if housekeeping_deleted_count | int == 0
+                 else 1)) }}
             housekeeping_result_message: >-
               {{ 'NO_FILES_FOUND - No eligible files found.'
                  if housekeeping_found_count | int == 0
                  else ('CLEANUP_ERROR - One or more deletion attempts failed.'
                  if housekeeping_failed_count | int > 0
-                 else ('NO_CHANGE - Filesystem utilization is unchanged.'
-                 if housekeeping_usage_after | int ==
-                    housekeeping_usage_before | int
-                 else ('SUCCESS - Housekeeping performed; utilization remains '
-                       'at or above threshold.'
+                 else ('NO_CHANGE - No files were deleted.'
+                 if housekeeping_deleted_count | int == 0
+                 else ('SUCCESS - Files deleted; utilization remains at or above threshold.'
                  if housekeeping_usage_after | int >= housekeeping_threshold
                  else 'SUCCESS - Housekeeping performed successfully.'))) }}
           when: housekeeping_usage_before | int >= housekeeping_threshold
