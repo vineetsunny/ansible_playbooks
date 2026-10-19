@@ -12,21 +12,14 @@
       - UK
       - US
 
-    # Override this variable in AAP inventory or job template.
     region: "{{ host_region | default('US') }}"
-
     log_file: /var/log/dc-tanium-housekeeping-psd-task.log
-
-    # Filesystem usage polling after cleanup.
     usage_check_retries: 6
     usage_check_delay: 5
 
   tasks:
 
-    # ---------------------------------------------------------
-    # 1. INITIALIZE REPORT
-    # ---------------------------------------------------------
-
+    # 1. Initialize report
     - name: Initialize housekeeping report
       ansible.builtin.set_fact:
         housekeeping_status: "NOT_STARTED"
@@ -41,37 +34,36 @@
         bytes_available_after: 0
         filesystem_size_kb: 0
         space_reclaimed_kb: 0
-        report_message: ""
+        report_message: "Housekeeping not started"
         start_time: "{{ now(utc=true, fmt='%Y-%m-%d %H:%M:%S') }}"
 
+    # 2. Validate directory
     - name: Check whether /var exists
       ansible.builtin.stat:
         path: "{{ housekeeping_dir }}"
       register: var_directory
 
-    - name: Stop when /var directory does not exist
+    - name: Set missing directory result
       ansible.builtin.set_fact:
         housekeeping_status: "DIRECTORY_NOT_PRESENT"
         housekeeping_exit_code: 21
         report_message: "/var directory does not exist"
-      when: not var_directory.stat.exists or
-            not var_directory.stat.isdir
+      when: not var_directory.stat.isdir | default(false)
 
+    # 3. Validate mount point
     - name: Check /var mount point
       ansible.builtin.command:
         argv:
           - findmnt
-          - --mountpoint
+          - -rn
+          - -M
           - "{{ housekeeping_dir }}"
-          - --noheadings
-          - --output
-          - TARGET
       register: mount_check
       changed_when: false
       failed_when: false
       when: housekeeping_exit_code == 0
 
-    - name: Stop when /var is not a separate mount point
+    - name: Set missing mount result
       ansible.builtin.set_fact:
         housekeeping_status: "FILESYSTEM_NOT_MOUNTED"
         housekeeping_exit_code: 22
@@ -80,7 +72,8 @@
         - housekeeping_exit_code == 0
         - mount_check.rc != 0
 
-    - name: Validate supported region
+    # 4. Validate region
+    - name: Set unsupported region result
       ansible.builtin.set_fact:
         housekeeping_status: "UNSUPPORTED_REGION"
         housekeeping_exit_code: 23
@@ -89,53 +82,38 @@
         - housekeeping_exit_code == 0
         - region | upper not in supported_regions
 
-    # ---------------------------------------------------------
-    # 2. READ INITIAL FILESYSTEM USAGE
-    # ---------------------------------------------------------
-
-    - name: Read initial /var filesystem statistics
-      ansible.builtin.shell: |
-        set -eu
-        df -Pk "{{ housekeeping_dir }}" |
-          awk 'NR == 2 {
-            gsub(/%/, "", $5)
-            printf "%s %s %s %s %s\n", $2, $3, $4, $5, $6
-          }'
-      args:
-        executable: /bin/bash
+    # 5. Read filesystem usage before cleanup
+    - name: Read initial /var filesystem usage
+      ansible.builtin.command:
+        argv:
+          - df
+          - -Pk
+          - "{{ housekeeping_dir }}"
       register: initial_df
       changed_when: false
       when: housekeeping_exit_code == 0
 
     - name: Store initial filesystem calculations
       ansible.builtin.set_fact:
-        filesystem_size_kb: "{{ initial_df.stdout.split()[0] | int }}"
-        bytes_used_before: "{{ (initial_df.stdout.split()[1] | int) * 1024 }}"
-        bytes_available_before: "{{ (initial_df.stdout.split()[2] | int) * 1024 }}"
-        usage_before: "{{ initial_df.stdout.split()[3] | int }}"
-        usage_after: "{{ initial_df.stdout.split()[3] | int }}"
+        filesystem_size_kb: "{{ initial_df.stdout_lines[1].split()[1] | int }}"
+        bytes_used_before: "{{ (initial_df.stdout_lines[1].split()[2] | int) * 1024 }}"
+        bytes_available_before: "{{ (initial_df.stdout_lines[1].split()[3] | int) * 1024 }}"
+        usage_before: "{{ initial_df.stdout_lines[1].split()[4] | regex_replace('%', '') | int }}"
+        usage_after: "{{ initial_df.stdout_lines[1].split()[4] | regex_replace('%', '') | int }}"
       when: housekeeping_exit_code == 0
 
-    # ---------------------------------------------------------
-    # 3. CHECK THRESHOLD
-    # ---------------------------------------------------------
-
-    - name: Mark housekeeping not required
+    # 6. Threshold decision
+    - name: Mark housekeeping as not required
       ansible.builtin.set_fact:
         housekeeping_status: "NOT_REQUIRED"
         housekeeping_exit_code: 0
-        report_message: >-
-          /var usage is {{ usage_before }}%,
-          at or below the {{ threshold }}% threshold.
+        report_message: "/var usage is at or below {{ threshold }}%"
       when:
         - housekeeping_exit_code == 0
         - usage_before | int <= threshold
 
-    # ---------------------------------------------------------
-    # 4. HOUSEKEEPING
-    # ---------------------------------------------------------
-
-    - name: Execute /var housekeeping
+    # 7. Perform cleanup
+    - name: Housekeeping when usage exceeds threshold
       when:
         - housekeeping_exit_code == 0
         - usage_before | int > threshold
@@ -148,74 +126,97 @@
             prefix: var-housekeeping-
           register: cleanup_report
 
-        - name: Apply housekeeping rules
-          ansible.builtin.shell: |
-            set -u
-            report={{ cleanup_report.path | quote }}
+        - name: Delete old archives, clean caches and process logs
+          ansible.builtin.shell:
+            cmd: |
+              set -u
 
-            record() {
-              printf '%s\n' "$1" >> "$report"
-            }
+              report="${CLEANUP_REPORT}"
 
-            # /var/tmp: archive files older than 15 days.
-            find /var/tmp -xdev -type f -mtime +15 \
-              \( -name '*.zip' -o -name '*.gz' \
-                 -o -name '*.tar' -o -name '*.xz' \
-                 -o -name '*.bz2' -o -name '*.tgz' \) \
-              -delete -print 2>/dev/null |
-              while IFS= read -r f; do
-                record "DELETED: $f"
-              done
+              record() {
+                printf '%s\n' "$1" >> "$report"
+              }
 
-            # /var/cache: old RPM and SQLite cache files.
-            if [ -d /var/cache ]; then
-              find /var/cache -xdev -type f -mtime +15 \
-                \( -name '*x86_64*rpm' -o -name '*.sqlite*' \) \
-                -delete -print 2>/dev/null |
-                while IFS= read -r f; do
-                  record "DELETED: $f"
-                done
-            fi
-
-            # Mail queue files older than 7 days.
-            for d in /var/spool/clientmqueue \
-                     /var/spool/postfix/maildrop; do
-              if [ -d "$d" ]; then
-                find "$d" -xdev -type f -mtime +7 \
-                  -delete -print 2>/dev/null |
-                  while IFS= read -r f; do
+              # /var/tmp: archives older than 15 days
+              if [ -d /var/tmp ]; then
+                find /var/tmp -xdev -type f -mtime +15 \
+                  \( -name '*.zip' -o -name '*.gz' \
+                     -o -name '*.tar' -o -name '*.xz' \
+                     -o -name '*.bz2' -o -name '*.tgz' \) \
+                  -print0 2>/dev/null |
+                while IFS= read -r -d '' f; do
+                  if rm -f -- "$f"; then
                     record "DELETED: $f"
-                  done
+                  else
+                    record "ERROR_DELETING: $f"
+                  fi
+                done
               fi
-            done
 
-            # Remove the specific obsolete Centrify upgrade directory.
-            find /var/tmp -xdev -type d \
-              -name 'centrify2017.3upgrade' -prune \
-              -exec rm -rf -- {} \; -print 2>/dev/null |
-              while IFS= read -r f; do
-                record "REMOVED_DIRECTORY: $f"
+              # /var/cache: old RPM and SQLite cache files
+              if [ -d /var/cache ]; then
+                find /var/cache -xdev -type f -mtime +15 \
+                  \( -name '*x86_64*rpm' -o -name '*.sqlite*' \) \
+                  -print0 2>/dev/null |
+                while IFS= read -r -d '' f; do
+                  if rm -f -- "$f"; then
+                    record "DELETED: $f"
+                  else
+                    record "ERROR_DELETING: $f"
+                  fi
+                done
+              fi
+
+              # Mail queue files older than 7 days
+              for d in /var/spool/clientmqueue \
+                       /var/spool/postfix/maildrop; do
+                if [ -d "$d" ]; then
+                  find "$d" -xdev -type f -mtime +7 \
+                    -print0 2>/dev/null |
+                  while IFS= read -r -d '' f; do
+                    if rm -f -- "$f"; then
+                      record "DELETED: $f"
+                    else
+                      record "ERROR_DELETING: $f"
+                    fi
+                  done
+                fi
               done
 
-            # Truncate large mlocate.db files without deleting them.
-            if [ -d /var/lib ]; then
-              find /var/lib -xdev -type f -name 'mlocate.db' \
-                -size +500000k -print0 2>/dev/null |
+              # Centrify upgrade directory
+              find /var/tmp -xdev -type d \
+                -name 'centrify2017.3upgrade' -prune \
+                -print0 2>/dev/null |
+              while IFS= read -r -d '' d; do
+                if rm -rf -- "$d"; then
+                  record "REMOVED_DIRECTORY: $d"
+                else
+                  record "ERROR_REMOVING_DIRECTORY: $d"
+                fi
+              done
+
+              # Truncate mlocate.db files larger than 500000 KiB
+              if [ -d /var/lib ]; then
+                find /var/lib -xdev -type f -name 'mlocate.db' \
+                  -size +500000k -print0 2>/dev/null |
                 while IFS= read -r -d '' f; do
                   if : > "$f"; then
                     record "TRUNCATED: $f"
+                  else
+                    record "ERROR_TRUNCATING: $f"
                   fi
                 done
-            fi
+              fi
 
-            # Compress eligible rotated system and authentication logs.
-            if [ -d /var/log ]; then
-              find /var/log -xdev -type f -mtime +2 -size +50000k \
-                \( -name '*messages-*' -o -name '*auth.log-*' \
-                   -o -name '*secure-*' -o -name '*wtmp-*' \
-                   -o -name 'messages.*' -o -name 'auth.log.*' \
-                   -o -name 'secure.*' -o -name 'wtmp.*' \) \
-                -print0 2>/dev/null |
+              # Compress eligible rotated logs
+              if [ -d /var/log ]; then
+                find /var/log -xdev -type f -mtime +2 \
+                  -size +50000k \
+                  \( -name '*messages-*' -o -name '*auth.log-*' \
+                     -o -name '*secure-*' -o -name '*wtmp-*' \
+                     -o -name 'messages.*' -o -name 'auth.log.*' \
+                     -o -name 'secure.*' -o -name 'wtmp.*' \) \
+                  -print0 2>/dev/null |
                 while IFS= read -r -d '' f; do
                   if gzip -- "$f"; then
                     record "COMPRESSED: $f"
@@ -224,10 +225,10 @@
                   fi
                 done
 
-              # Compress old system activity files.
-              if [ -d /var/log/sa ]; then
-                find /var/log/sa -xdev -type f -mtime +3 \
-                  -name 'sa*' -size +50000k -print0 2>/dev/null |
+                if [ -d /var/log/sa ]; then
+                  find /var/log/sa -xdev -type f -mtime +3 \
+                    -name 'sa*' -size +50000k \
+                    -print0 2>/dev/null |
                   while IFS= read -r -d '' f; do
                     if gzip -- "$f"; then
                       record "COMPRESSED: $f"
@@ -235,37 +236,36 @@
                       record "ERROR_COMPRESSING: $f"
                     fi
                   done
+                fi
               fi
-            fi
 
-            # Remove old core files, matching the script's
-            # cleanVarCrash function.
-            if [ -d /var/crash ]; then
-              find /var/crash -xdev -type f -mtime +3 \
-                -name '*core*' -delete -print 2>/dev/null |
-                while IFS= read -r f; do
-                  record "DELETED_CORE: $f"
+              # Remove old core files
+              if [ -d /var/crash ]; then
+                find /var/crash -xdev -type f -mtime +3 \
+                  -name '*core*' -print0 2>/dev/null |
+                while IFS= read -r -d '' f; do
+                  if rm -f -- "$f"; then
+                    record "DELETED_CORE: $f"
+                  else
+                    record "ERROR_DELETING_CORE: $f"
+                  fi
                 done
-            fi
+              fi
 
-            cat "$report"
-          args:
+              cat "$report"
             executable: /bin/bash
+          environment:
+            CLEANUP_REPORT: "{{ cleanup_report.path }}"
           register: cleanup_output
-          changed_when: >-
-            'DELETED:' in cleanup_output.stdout or
-            'REMOVED_DIRECTORY:' in cleanup_output.stdout or
-            'TRUNCATED:' in cleanup_output.stdout or
-            'COMPRESSED:' in cleanup_output.stdout or
-            'DELETED_CORE:' in cleanup_output.stdout
+          changed_when: false
 
-        - name: Store cleanup actions and count
+        - name: Store cleanup actions
           ansible.builtin.set_fact:
             cleanup_actions: "{{ cleanup_output.stdout_lines | default([]) }}"
             files_affected: >-
               {{
                 cleanup_output.stdout_lines | default([])
-                | reject('match', '^ERROR_COMPRESSING:')
+                | select('match', '^(DELETED:|REMOVED_DIRECTORY:|TRUNCATED:|COMPRESSED:|DELETED_CORE:)')
                 | list | length
               }}
 
@@ -274,33 +274,26 @@
             path: "{{ cleanup_report.path }}"
             state: absent
 
-        # -----------------------------------------------------
-        # 5. VERIFY FILESYSTEM USAGE AFTER CLEANUP
-        # -----------------------------------------------------
-
-        - name: Read /var filesystem usage after cleanup
-          ansible.builtin.shell: |
-            set -eu
-            df -Pk "{{ housekeeping_dir }}" |
-              awk 'NR == 2 {
-                gsub(/%/, "", $5)
-                printf "%s %s %s %s %s\n", $2, $3, $4, $5, $6
-              }'
-          args:
-            executable: /bin/bash
+        # 8. Read final filesystem usage
+        - name: Read filesystem usage after cleanup
+          ansible.builtin.command:
+            argv:
+              - df
+              - -Pk
+              - "{{ housekeeping_dir }}"
           register: after_df
           changed_when: false
-          until: after_df.stdout | length > 0
+          until: after_df.stdout_lines | length >= 2
           retries: "{{ usage_check_retries }}"
           delay: "{{ usage_check_delay }}"
 
         - name: Store final filesystem calculations
           ansible.builtin.set_fact:
-            bytes_used_after: "{{ (after_df.stdout.split()[1] | int) * 1024 }}"
-            bytes_available_after: "{{ (after_df.stdout.split()[2] | int) * 1024 }}"
-            usage_after: "{{ after_df.stdout.split()[3] | int }}"
+            bytes_used_after: "{{ (after_df.stdout_lines[1].split()[2] | int) * 1024 }}"
+            bytes_available_after: "{{ (after_df.stdout_lines[1].split()[3] | int) * 1024 }}"
+            usage_after: "{{ after_df.stdout_lines[1].split()[4] | regex_replace('%', '') | int }}"
 
-        - name: Calculate space reclaimed
+        - name: Calculate net space reclaimed
           ansible.builtin.set_fact:
             space_reclaimed_kb: >-
               {{
@@ -310,80 +303,62 @@
                 ) // 1024
               }}
 
-        # -----------------------------------------------------
-        # 6. DETERMINE FINAL RESULT
-        # -----------------------------------------------------
-
-        - name: Set result when no cleanup actions were performed
+        # 9. Determine final status
+        - name: Set no files found result
           ansible.builtin.set_fact:
             housekeeping_status: "NO_FILES_FOUND"
             housekeeping_exit_code: 3
-            report_message: >-
-              No eligible files were successfully processed.
-              PSD attention may be required.
+            report_message: "No cleanup actions succeeded; PSD attention may be required"
           when: files_affected | int == 0
 
-        - name: Set result when usage remains above threshold
+        - name: Set usage still high result
           ansible.builtin.set_fact:
             housekeeping_status: "USAGE_STILL_HIGH"
             housekeeping_exit_code: 2
-            report_message: >-
-              Cleanup actions were performed, but /var usage remains
-              above {{ threshold }}%.
+            report_message: "/var usage remains above {{ threshold }}%"
           when:
             - files_affected | int > 0
             - usage_after | int > threshold
 
-        - name: Set result when usage is at or below threshold
+        - name: Set housekeeping success result
           ansible.builtin.set_fact:
             housekeeping_status: "SUCCESS"
             housekeeping_exit_code: 1
-            report_message: >-
-              Housekeeping completed successfully.
-              /var usage is now at or below {{ threshold }}%.
+            report_message: "Housekeeping completed; /var usage is at or below {{ threshold }}%"
           when:
             - files_affected | int > 0
             - usage_after | int <= threshold
 
-    # ---------------------------------------------------------
-    # 7. FINAL REPORT
-    # ---------------------------------------------------------
-
-    - name: Display final housekeeping report
+    # 10. Final report
+    - name: Display final housekeeping summary
       ansible.builtin.debug:
         msg:
           - "========== /var HOUSEKEEPING FINAL REPORT =========="
           - "Host: {{ inventory_hostname }}"
           - "Region: {{ region | upper }}"
-          - "Directory: {{ housekeeping_dir }}"
+          - "Filesystem: {{ housekeeping_dir }}"
           - "Threshold: {{ threshold }}%"
-          - "Start time (UTC): {{ start_time }}"
-          - "Filesystem size: {{ filesystem_size_kb }} KB"
-          - "Usage before cleanup: {{ usage_before }}%"
-          - "Bytes used before: {{ bytes_used_before }}"
+          - "Start time UTC: {{ start_time }}"
+          - "Filesystem size: {{ filesystem_size_kb }} KiB"
+          - "Usage before: {{ usage_before }}%"
+          - "Used bytes before: {{ bytes_used_before }}"
           - "Available bytes before: {{ bytes_available_before }}"
-          - "Files/actions processed: {{ files_affected }}"
-          - "Usage after cleanup: {{ usage_after }}%"
-          - "Bytes used after: {{ bytes_used_after }}"
+          - "Successful actions: {{ files_affected }}"
+          - "Usage after: {{ usage_after }}%"
+          - "Used bytes after: {{ bytes_used_after }}"
           - "Available bytes after: {{ bytes_available_after }}"
-          - "Net space reclaimed (KB): {{ space_reclaimed_kb }}"
+          - "Net space reclaimed: {{ space_reclaimed_kb }} KiB"
           - "Final status: {{ housekeeping_status }}"
           - "Exit-code equivalent: {{ housekeeping_exit_code }}"
           - "Result: {{ report_message }}"
           - "===================================================="
 
-    - name: Display individual cleanup actions
+    - name: Display cleanup action details
       ansible.builtin.debug:
         var: cleanup_actions
       when: cleanup_actions | length > 0
 
-    - name: Ensure housekeeping log directory exists
-      ansible.builtin.file:
-        path: /var/log
-        state: directory
-      when: var_directory.stat.exists | default(false)
-
-    - name: Append final summary to housekeeping log
+    - name: Append summary to housekeeping log
       ansible.builtin.lineinfile:
         path: "{{ log_file }}"
         create: true
@@ -394,9 +369,9 @@
           region={{ region | upper }}
           usage_before={{ usage_before }}%
           usage_after={{ usage_after }}%
-          actions={{ files_affected }}
+          successful_actions={{ files_affected }}
           reclaimed_kb={{ space_reclaimed_kb }}
           status={{ housekeeping_status }}
           exit_code={{ housekeeping_exit_code }}
           result="{{ report_message }}"
-      when: var_directory.stat.exists | default(false)
+      when: var_directory.stat.isdir | default(false)
