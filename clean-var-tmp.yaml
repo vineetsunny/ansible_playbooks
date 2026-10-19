@@ -222,6 +222,7 @@
         housekeeping_result: "CLEANUP_COMMAND_FAILED"
       when:
         - cleanup_output is defined
+        - cleanup_output.rc is defined
         - cleanup_output.rc != 0
 
     - name: Append housekeeping report to server log
