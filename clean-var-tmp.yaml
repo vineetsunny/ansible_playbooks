@@ -41,7 +41,7 @@
 
 ---
 - name: Production /var/tmp housekeeping
-  hosts: all
+  hosts: linux-test
   become: true
   gather_facts: true
 
