@@ -224,7 +224,7 @@
         - cleanup_output is defined
         - cleanup_output.rc is defined
         - cleanup_output.rc != 0
-
+    
     - name: Append housekeeping report to server log
       ansible.builtin.shell: |
         {
@@ -235,20 +235,22 @@
             {{ (region | default('UNKNOWN') | upper) | quote }} \
             {{ housekeeping_dir | quote }} \
             {{ housekeeping_result | quote }} \
-            {{ ('UNDEFINED' if (cleanup_output is defined and cleanup_output.rc != 0) else housekeeping_exit_code | string) | quote }}
+            {{ housekeeping_exit_code | string | quote }}
 
           printf 'UsageBefore=%s%%\n' {{ usage_before | string | quote }}
           printf 'UsageAfter=%s%%\n' {{ usage_after | string | quote }}
           printf 'FilesDeleted=%s\n' {{ deleted_file_count | string | quote }}
 
-          {% if cleanup_output is defined and cleanup_output.stdout | default('') | length > 0 %}
+          {% if cleanup_output is defined and cleanup_output.rc is defined %}
+          printf 'CleanupCommandExitStatus=%s\n' {{ cleanup_output.rc | string | quote }}
+          {% if cleanup_output.stdout | default('') | length > 0 %}
           printf '%s\n' 'Successfully deleted files:'
           printf '%s\n' {{ cleanup_output.stdout | quote }}
           {% endif %}
-
-          {% if cleanup_output is defined and cleanup_output.rc != 0 %}
-          printf 'CleanupErrorExitStatus=%s\n' {{ cleanup_output.rc | string | quote }}
-          printf '%s\n' {{ cleanup_output.stderr | default('No error details returned') | quote }}
+          {% if cleanup_output.stderr | default('') | length > 0 %}
+          printf '%s\n' 'Cleanup errors:'
+          printf '%s\n' {{ cleanup_output.stderr | quote }}
+          {% endif %}
           {% endif %}
 
           printf '%s\n' '----------------------------------------'
