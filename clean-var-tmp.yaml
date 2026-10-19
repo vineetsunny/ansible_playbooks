@@ -150,8 +150,9 @@
           {{ cleanup_output.stdout_lines | default([]) | length }}
       when:
         - cleanup_output is defined
+        - cleanup_output.rc is defined
         - cleanup_output.rc == 0
-
+    
     # Recheck usage even when no eligible files were found.
     - name: Read final filesystem usage
       ansible.builtin.command:
