@@ -1,3 +1,4 @@
+
 ---
 - name: Production housekeeping for /var/tmp
   hosts: all
@@ -9,22 +10,28 @@
   vars:
     housekeeping_dir: /var/tmp
     usage_threshold: 75
-    file_age_minutes: 21600
+    file_age_minutes: 21600  # Strictly older than 15 days
     supported_regions:
       - GB
       - UK
       - US
+
     housekeeping_log: /var/log/dc-tanium-housekeeping-psd-task.log
     log_prefix: Tanium-Housekeeping-PSD-Task-VAR
 
   tasks:
-    - name: Initialize housekeeping variables
+    # ---------------------------------------------------------
+    # 1. Initialize all variables so skipped tasks are safe.
+    # ---------------------------------------------------------
+    - name: Initialize housekeeping results
       ansible.builtin.set_fact:
         housekeeping_exit_code: 0
         housekeeping_result: "NOT_STARTED"
         usage_before: "N/A"
         usage_after: "N/A"
         deleted_file_count: 0
+        cleanup_executed: false
+        cleanup_failed: false
 
     - name: Ensure housekeeping log exists
       ansible.builtin.file:
@@ -35,7 +42,10 @@
         mode: "0640"
       changed_when: false
 
-    # Exit code 21: directory is missing.
+    # ---------------------------------------------------------
+    # 2. Check directory.
+    # Exit 21: directory missing.
+    # ---------------------------------------------------------
     - name: Check housekeeping directory
       ansible.builtin.stat:
         path: "{{ housekeeping_dir }}"
@@ -46,16 +56,21 @@
         housekeeping_exit_code: 21
         housekeeping_result: "DIRECTORY_NOT_PRESENT"
       when: >
-        not directory_check.stat.exists or
-        not directory_check.stat.isdir
+        not (directory_check.stat.exists | default(false))
+        or not (directory_check.stat.isdir | default(false))
 
-    # Exit code 22: directory is not an exact mount point.
-    - name: Check exact filesystem mount
+    # ---------------------------------------------------------
+    # 3. Check the mounted filesystem backing /var/tmp.
+    # Use -T rather than -M: /var/tmp can be a directory
+    # on the root filesystem and need not be a separate mount.
+    # Exit 22: no mounted filesystem can be identified.
+    # ---------------------------------------------------------
+    - name: Identify filesystem backing housekeeping directory
       ansible.builtin.command:
         argv:
           - findmnt
           - -rn
-          - -M
+          - -T
           - "{{ housekeeping_dir }}"
           - -o
           - TARGET
@@ -70,10 +85,14 @@
         housekeeping_result: "FILESYSTEM_NOT_MOUNTED"
       when:
         - housekeeping_exit_code == 0
-        - mount_check.rc != 0
+        - mount_check.rc | default(1) != 0
+          or mount_check.stdout | default('') | trim == ''
 
-    # Exit code 23: unsupported or missing region.
-    - name: Validate server region
+    # ---------------------------------------------------------
+    # 4. Validate region.
+    # Exit 23: unsupported or missing region.
+    # ---------------------------------------------------------
+    - name: Validate supported region
       ansible.builtin.set_fact:
         housekeeping_exit_code: 23
         housekeeping_result: "REGION_NOT_SUPPORTED"
@@ -81,7 +100,9 @@
         - housekeeping_exit_code == 0
         - (region | default('') | upper) not in supported_regions
 
-    # Capture usage before cleanup.
+    # ---------------------------------------------------------
+    # 5. Capture usage before cleanup.
+    # ---------------------------------------------------------
     - name: Read initial filesystem usage
       ansible.builtin.command:
         argv:
@@ -92,7 +113,7 @@
       changed_when: false
       when: housekeeping_exit_code == 0
 
-    - name: Validate initial filesystem usage output
+    - name: Validate initial filesystem usage
       ansible.builtin.assert:
         that:
           - initial_df.rc == 0
@@ -100,19 +121,21 @@
           - initial_df.stdout_lines[-1].split() | length >= 5
           - initial_df.stdout_lines[-1].split()[4] is match('^[0-9]+%$')
         fail_msg: >-
-          Unable to read a valid filesystem usage percentage for
+          Cannot determine valid filesystem usage for
           {{ housekeeping_dir }} on {{ inventory_hostname }}.
       when: housekeeping_exit_code == 0
 
-    - name: Store initial filesystem usage
+    - name: Save initial filesystem usage
       ansible.builtin.set_fact:
         usage_before: >-
           {{ initial_df.stdout_lines[-1].split()[4]
              | regex_replace('%', '') | int }}
       when: housekeeping_exit_code == 0
 
-    # Exit code 0: usage is at or below 75%.
-    - name: Skip housekeeping below threshold
+    # ---------------------------------------------------------
+    # 6. Exit 0 when usage is at or below 75%.
+    # ---------------------------------------------------------
+    - name: Set housekeeping not required result
       ansible.builtin.set_fact:
         housekeeping_exit_code: 0
         housekeeping_result: "HOUSEKEEPING_NOT_REQUIRED"
@@ -120,8 +143,12 @@
         - housekeeping_exit_code == 0
         - usage_before | int <= usage_threshold
 
-    # Run discovery and deletion using the same filesystem boundary.
-    # -delete -print reports a path only after successful deletion.
+    # ---------------------------------------------------------
+    # 7. Clean eligible files only above the threshold.
+    # -xdev prevents traversal into other filesystems.
+    # -mmin +21600 selects files older than 15 days.
+    # -delete -print reports paths successfully deleted.
+    # ---------------------------------------------------------
     - name: Delete eligible old archive files
       ansible.builtin.shell: |
         find {{ housekeeping_dir | quote }} \
@@ -138,13 +165,21 @@
       args:
         executable: /bin/bash
       register: cleanup_output
-      changed_when: cleanup_output.stdout | default('') | length > 0
+      changed_when: >
+        cleanup_output.stdout | default('') | length > 0
       failed_when: false
       when:
         - housekeeping_exit_code == 0
         - usage_before | int > usage_threshold
 
-    - name: Count successfully deleted files
+    - name: Record whether cleanup ran
+      ansible.builtin.set_fact:
+        cleanup_executed: true
+      when:
+        - cleanup_output is defined
+        - cleanup_output.rc is defined
+
+    - name: Count deleted files
       ansible.builtin.set_fact:
         deleted_file_count: >-
           {{ cleanup_output.stdout_lines | default([]) | length }}
@@ -152,8 +187,19 @@
         - cleanup_output is defined
         - cleanup_output.rc is defined
         - cleanup_output.rc == 0
-    
-    # Recheck usage even when no eligible files were found.
+
+    - name: Record cleanup command failure
+      ansible.builtin.set_fact:
+        cleanup_failed: true
+        housekeeping_result: "CLEANUP_COMMAND_FAILED"
+      when:
+        - cleanup_output is defined
+        - cleanup_output.rc is defined
+        - cleanup_output.rc != 0
+
+    # ---------------------------------------------------------
+    # 8. Recheck usage if cleanup was attempted.
+    # ---------------------------------------------------------
     - name: Read final filesystem usage
       ansible.builtin.command:
         argv:
@@ -162,11 +208,9 @@
           - "{{ housekeeping_dir }}"
       register: final_df
       changed_when: false
-      when:
-        - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold
+      when: cleanup_executed
 
-    - name: Validate final filesystem usage output
+    - name: Validate final filesystem usage
       ansible.builtin.assert:
         that:
           - final_df.rc == 0
@@ -174,35 +218,33 @@
           - final_df.stdout_lines[-1].split() | length >= 5
           - final_df.stdout_lines[-1].split()[4] is match('^[0-9]+%$')
         fail_msg: >-
-          Unable to verify filesystem usage after housekeeping on
+          Unable to verify filesystem usage after cleanup on
           {{ inventory_hostname }}.
-      when:
-        - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold
+      when: cleanup_executed
 
-    - name: Store final filesystem usage
+    - name: Save final filesystem usage
       ansible.builtin.set_fact:
         usage_after: >-
           {{ final_df.stdout_lines[-1].split()[4]
              | regex_replace('%', '') | int }}
-      when:
-        - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold
+      when: cleanup_executed
 
-    # Exit code 3: no eligible files were deleted.
+    # ---------------------------------------------------------
+    # 9. Assign original result codes.
+    # Exit 3: no files deleted/found.
+    # Exit 2: usage remains above threshold.
+    # Exit 1: cleanup performed and usage is at/below threshold.
+    # ---------------------------------------------------------
     - name: Set no files found result
       ansible.builtin.set_fact:
         housekeeping_exit_code: 3
         housekeeping_result: "NO_FILES_FOUND"
       when:
-        - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold
-        - cleanup_output.rc == 0
+        - cleanup_executed
+        - not cleanup_failed
         - deleted_file_count | int == 0
 
-    # Exit code 2: usage is still above threshold.
-    # Exit code 1: cleanup succeeded and usage is now at/below threshold.
-    - name: Set final cleanup result
+    - name: Set successful cleanup result
       ansible.builtin.set_fact:
         housekeeping_exit_code: >-
           {{ 2 if (usage_after | int > usage_threshold) else 1 }}
@@ -211,20 +253,13 @@
              if (usage_after | int > usage_threshold)
              else 'HOUSEKEEPING_PERFORMED' }}
       when:
-        - housekeeping_exit_code == 0
-        - usage_before | int > usage_threshold
-        - cleanup_output.rc == 0
+        - cleanup_executed
+        - not cleanup_failed
         - deleted_file_count | int > 0
 
-    # Unexpected find errors are logged, then reported as an Ansible failure.
-    - name: Record cleanup command failure
-      ansible.builtin.set_fact:
-        housekeeping_result: "CLEANUP_COMMAND_FAILED"
-      when:
-        - cleanup_output is defined
-        - cleanup_output.rc is defined
-        - cleanup_output.rc != 0
-    
+    # ---------------------------------------------------------
+    # 10. Write the report. All fields have safe defaults.
+    # ---------------------------------------------------------
     - name: Append housekeeping report to server log
       ansible.builtin.shell: |
         {
@@ -242,13 +277,16 @@
           printf 'FilesDeleted=%s\n' {{ deleted_file_count | string | quote }}
 
           {% if cleanup_output is defined and cleanup_output.rc is defined %}
-          printf 'CleanupCommandExitStatus=%s\n' {{ cleanup_output.rc | string | quote }}
+          printf 'CleanupCommandExitStatus=%s\n' \
+            {{ cleanup_output.rc | string | quote }}
+
           {% if cleanup_output.stdout | default('') | length > 0 %}
-          printf '%s\n' 'Successfully deleted files:'
+          printf '%s\n' 'Deleted file paths:'
           printf '%s\n' {{ cleanup_output.stdout | quote }}
           {% endif %}
+
           {% if cleanup_output.stderr | default('') | length > 0 %}
-          printf '%s\n' 'Cleanup errors:'
+          printf '%s\n' 'Cleanup error details:'
           printf '%s\n' {{ cleanup_output.stderr | quote }}
           {% endif %}
           {% endif %}
@@ -259,6 +297,9 @@
         executable: /bin/bash
       changed_when: false
 
+    # ---------------------------------------------------------
+    # 11. Display final results.
+    # ---------------------------------------------------------
     - name: Display housekeeping summary
       ansible.builtin.debug:
         msg:
@@ -272,12 +313,11 @@
           - "Housekeeping exit code: {{ housekeeping_exit_code }}"
           - "Log: {{ housekeeping_log }}"
 
-    - name: Fail job if cleanup command failed
+    # Fail only on a genuine cleanup command error.
+    # Expected housekeeping outcomes do not fail the AAP job.
+    - name: Report cleanup command failure
       ansible.builtin.fail:
         msg: >-
-          Cleanup failed on {{ inventory_hostname }}.
-          Find exit status={{ cleanup_output.rc }}.
-          Check {{ housekeeping_log }} for details.
-      when:
-        - cleanup_output is defined
-        - cleanup_output.rc != 0
+          Cleanup command failed on {{ inventory_hostname }}.
+          Check {{ housekeeping_log }} and the cleanup error output.
+      when: cleanup_failed
