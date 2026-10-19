@@ -17,23 +17,21 @@
       - UK
       - US
 
-    housekeeping_patterns:
-      - "*.zip"
-      - "*.gz"
-      - "*.tar"
-      - "*.xz"
-      - "*.bz2"
-      - "*.tgz"
-
   tasks:
-    - name: Initialize housekeeping result
+    - name: Initialize housekeeping results
       ansible.builtin.set_fact:
         housekeeping_result_code: 0
         housekeeping_result_message: "Housekeeping not started"
-        housekeeping_usage_before: -1
-        housekeeping_usage_after: -1
-        housekeeping_deleted_count: 0
+        housekeeping_usage_before: 0
+        housekeeping_usage_after: 0
+        housekeeping_used_before: 0
+        housekeeping_used_after: 0
+        housekeeping_size_before: 0
+        housekeeping_size_after: 0
+        housekeeping_avail_before: 0
+        housekeeping_avail_after: 0
         housekeeping_found_count: 0
+        housekeeping_deleted_count: 0
         housekeeping_failed_count: 0
 
     - name: Ensure housekeeping log exists
@@ -85,69 +83,134 @@
               - "{{ housekeeping_dir }}"
           register: housekeeping_mount
           changed_when: false
-          failed_when: false
 
-        - name: Validate filesystem mount information
-          ansible.builtin.assert:
-            that:
-              - housekeeping_mount.rc == 0
-              - housekeeping_mount.stdout | trim | length > 0
-            fail_msg: >-
-              EXIT CODE 22 - Unable to identify the filesystem
-              containing {{ housekeeping_dir }}.
-            quiet: true
-
-        - name: Display containing filesystem
+        - name: Display filesystem mount point
           ansible.builtin.debug:
             msg: >-
-              Directory {{ housekeeping_dir }} resides on mount point
-              {{ housekeeping_mount.stdout | trim }}.
+              Directory {{ housekeeping_dir }} resides on filesystem
+              mounted at {{ housekeeping_mount.stdout | trim }}.
 
-        - name: Read filesystem utilization before housekeeping
-          ansible.builtin.command:
-            argv:
-              - df
-              - -P
-              - "{{ housekeeping_dir }}"
-          register: housekeeping_df_before
+        # Measure the filesystem before cleanup.
+        # Require three consecutive identical USED and AVAILABLE byte
+        # readings, or return the latest reading after the timeout.
+        - name: Measure and stabilize filesystem utilization before cleanup
+          ansible.builtin.shell: |
+            set -u
+
+            dir={{ housekeeping_dir | quote }}
+            previous=""
+            stable_count=0
+            stable=no
+            size=""
+            used=""
+            avail=""
+            percent=""
+
+            for attempt in $(seq 1 12); do
+              values=$(df -P -B1 \
+                --output=size,used,avail,pcent -- "$dir" |
+                awk 'NR == 2 {
+                  gsub(/%/, "", $4)
+                  print $1, $2, $3, $4
+                }')
+
+              if [[ -z "$values" ]]; then
+                echo "ERROR: Unable to read filesystem utilization" >&2
+                exit 1
+              fi
+
+              read -r size used avail percent <<< "$values"
+              current="${used}:${avail}"
+
+              echo "Before check ${attempt}: size=${size} used=${used} available=${avail} usage=${percent}%"
+
+              if [[ "$current" == "$previous" ]]; then
+                stable_count=$((stable_count + 1))
+              else
+                stable_count=0
+              fi
+
+              if (( stable_count >= 2 )); then
+                stable=yes
+                break
+              fi
+
+              previous="$current"
+              sleep 5
+            done
+
+            echo "SIZE_BYTES=${size}"
+            echo "USED_BYTES=${used}"
+            echo "AVAILABLE_BYTES=${avail}"
+            echo "USAGE_PERCENT=${percent}"
+            echo "MEASUREMENT_STABLE=${stable}"
+          args:
+            executable: /bin/bash
+          register: housekeeping_before_measurement
           changed_when: false
 
-        - name: Extract initial utilization
+        - name: Extract before-cleanup filesystem measurements
           ansible.builtin.set_fact:
+            housekeeping_size_before: >-
+              {{ housekeeping_before_measurement.stdout_lines
+                 | select('match', '^SIZE_BYTES=')
+                 | list | last
+                 | regex_replace('^SIZE_BYTES=', '') | int }}
+            housekeeping_used_before: >-
+              {{ housekeeping_before_measurement.stdout_lines
+                 | select('match', '^USED_BYTES=')
+                 | list | last
+                 | regex_replace('^USED_BYTES=', '') | int }}
+            housekeeping_avail_before: >-
+              {{ housekeeping_before_measurement.stdout_lines
+                 | select('match', '^AVAILABLE_BYTES=')
+                 | list | last
+                 | regex_replace('^AVAILABLE_BYTES=', '') | int }}
             housekeeping_usage_before: >-
-              {{ housekeeping_df_before.stdout_lines[1].split()[4]
-                 | regex_replace('%', '') | int }}
-            housekeeping_usage_after: >-
-              {{ housekeeping_df_before.stdout_lines[1].split()[4]
-                 | regex_replace('%', '') | int }}
+              {{ housekeeping_before_measurement.stdout_lines
+                 | select('match', '^USAGE_PERCENT=')
+                 | list | last
+                 | regex_replace('^USAGE_PERCENT=', '') | int }}
+            housekeeping_before_stable: >-
+              {{ housekeeping_before_measurement.stdout_lines
+                 | select('match', '^MEASUREMENT_STABLE=')
+                 | list | last
+                 | regex_replace('^MEASUREMENT_STABLE=', '') }}
 
-        - name: Display initial utilization
+        - name: Display before-cleanup measurement
           ansible.builtin.debug:
-            msg: >-
-              Filesystem utilization before cleanup:
-              {{ housekeeping_usage_before }}%.
-              Cleanup threshold: {{ housekeeping_threshold }}%.
+            msg:
+              - "Filesystem: {{ housekeeping_mount.stdout | trim }}"
+              - "Total bytes: {{ housekeeping_size_before }}"
+              - "Used bytes: {{ housekeeping_used_before }}"
+              - "Available bytes: {{ housekeeping_avail_before }}"
+              - "Utilization: {{ housekeeping_usage_before }}%"
+              - "Measurement stable: {{ housekeeping_before_stable }}"
 
-        - name: Log initial utilization
+        - name: Log before-cleanup measurement
           ansible.builtin.lineinfile:
             path: "{{ housekeeping_log }}"
             line: >-
-              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }}
               {{ housekeeping_log_prefix }}:
-              Usage before housekeeping =
-              {{ housekeeping_usage_before }}%
+              BEFORE size={{ housekeeping_size_before }}
+              used={{ housekeeping_used_before }}
+              available={{ housekeeping_avail_before }}
+              usage={{ housekeeping_usage_before }}%
+              stable={{ housekeeping_before_stable }}
             insertafter: EOF
             create: true
             owner: root
             group: root
             mode: "0640"
 
-        - name: Set result when housekeeping is not required
+        - name: Skip cleanup when utilization is below threshold
           ansible.builtin.set_fact:
             housekeeping_result_code: 0
             housekeeping_result_message: >-
-              Housekeeping not required.
-              Utilization is {{ housekeeping_usage_before }}%.
+              Housekeeping not required. Filesystem utilization is
+              {{ housekeeping_usage_before }}%, below the
+              {{ housekeeping_threshold }}% threshold.
           when: housekeeping_usage_before | int < housekeeping_threshold
 
         - name: Find and delete eligible archive files
@@ -157,8 +220,7 @@
             dir={{ housekeeping_dir | quote }}
             log={{ housekeeping_log | quote }}
             prefix={{ housekeeping_log_prefix | quote }}
-            age_days={{ housekeeping_age_days | int }}
-            cutoff_minutes=$((age_days * 1440))
+            cutoff_minutes=$(( {{ housekeeping_age_days | int }} * 1440 ))
 
             found_count=0
             deleted_count=0
@@ -182,12 +244,8 @@
             done < <(
               find "$dir" -xdev -type f \
                 -mmin +"$cutoff_minutes" \
-                \( -name '*.zip' -o \
-                   -name '*.gz'  -o \
-                   -name '*.tar' -o \
-                   -name '*.xz'  -o \
-                   -name '*.bz2' -o \
-                   -name '*.tgz' \) \
+                \( -name '*.zip' -o -name '*.gz' -o -name '*.tar' \
+                   -o -name '*.xz' -o -name '*.bz2' -o -name '*.tgz' \) \
                 -print0
             )
 
@@ -203,81 +261,109 @@
         - name: Record cleanup counts
           ansible.builtin.set_fact:
             housekeeping_found_count: >-
-              {{ housekeeping_cleanup.stdout.split()[0]
-                 | regex_replace('FOUND=', '') | int }}
+              {{ housekeeping_cleanup.stdout_lines
+                 | select('match', '^FOUND=')
+                 | list | last
+                 | regex_replace('^FOUND=', '') | int }}
             housekeeping_deleted_count: >-
-              {{ housekeeping_cleanup.stdout.split()[1]
-                 | regex_replace('DELETED=', '') | int }}
+              {{ housekeeping_cleanup.stdout_lines
+                 | select('match', '^DELETED=')
+                 | list | last
+                 | regex_replace('^DELETED=', '') | int }}
             housekeeping_failed_count: >-
-              {{ housekeeping_cleanup.stdout.split()[2]
-                 | regex_replace('FAILED=', '') | int }}
+              {{ housekeeping_cleanup.stdout_lines
+                 | select('match', '^FAILED=')
+                 | list | last
+                 | regex_replace('^FAILED=', '') | int }}
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
-        - name: Flush pending filesystem operations
-          ansible.builtin.command:
-            argv:
-              - sync
-          changed_when: false
-          when: housekeeping_usage_before | int >= housekeeping_threshold
-
-        - name: Wait for filesystem utilization to stabilize
+        # Measure after cleanup using the same method as before cleanup.
+        - name: Measure and stabilize filesystem utilization after cleanup
           ansible.builtin.shell: |
             set -u
 
             dir={{ housekeeping_dir | quote }}
             previous=""
             stable_count=0
-            usage=""
+            stable=no
+            size=""
+            used=""
+            avail=""
+            percent=""
 
-            for attempt in {1..12}; do
-              usage=$(df -P "$dir" | awk 'NR==2 {
-                gsub(/%/, "", $5)
-                print $5
-              }')
+            sync
 
-              if [[ -z "$usage" ]]; then
+            for attempt in $(seq 1 12); do
+              values=$(df -P -B1 \
+                --output=size,used,avail,pcent -- "$dir" |
+                awk 'NR == 2 {
+                  gsub(/%/, "", $4)
+                  print $1, $2, $3, $4
+                }')
+
+              if [[ -z "$values" ]]; then
                 echo "ERROR: Unable to read filesystem utilization" >&2
                 exit 1
               fi
 
-              echo "Check ${attempt}: filesystem usage=${usage}%"
+              read -r size used avail percent <<< "$values"
+              current="${used}:${avail}"
 
-              if [[ "$usage" == "$previous" ]]; then
+              echo "After check ${attempt}: size=${size} used=${used} available=${avail} usage=${percent}%"
+
+              if [[ "$current" == "$previous" ]]; then
                 stable_count=$((stable_count + 1))
               else
                 stable_count=0
               fi
 
-              if ((stable_count >= 2)); then
-                echo "Usage stabilized at ${usage}%"
+              if (( stable_count >= 2 )); then
+                stable=yes
                 break
               fi
 
-              previous="$usage"
-              sleep 10
+              previous="$current"
+              sleep 5
             done
 
-            printf 'FINAL_USAGE=%s\n' "$usage"
+            echo "SIZE_BYTES=${size}"
+            echo "USED_BYTES=${used}"
+            echo "AVAILABLE_BYTES=${avail}"
+            echo "USAGE_PERCENT=${percent}"
+            echo "MEASUREMENT_STABLE=${stable}"
           args:
             executable: /bin/bash
-          register: housekeeping_df_after
+          register: housekeeping_after_measurement
           changed_when: false
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
-        - name: Extract stabilized utilization
+        - name: Extract after-cleanup filesystem measurements
           ansible.builtin.set_fact:
-            housekeeping_usage_after: >-
-              {{ housekeeping_df_after.stdout_lines
-                 | select('match', '^FINAL_USAGE=')
+            housekeeping_size_after: >-
+              {{ housekeeping_after_measurement.stdout_lines
+                 | select('match', '^SIZE_BYTES=')
                  | list | last
-                 | regex_replace('^FINAL_USAGE=', '') | int }}
-          when: housekeeping_usage_before | int >= housekeeping_threshold
-
-        - name: Display stabilized utilization
-          ansible.builtin.debug:
-            msg: >-
-              Filesystem utilization after cleanup and stabilization:
-              {{ housekeeping_usage_after }}%.
+                 | regex_replace('^SIZE_BYTES=', '') | int }}
+            housekeeping_used_after: >-
+              {{ housekeeping_after_measurement.stdout_lines
+                 | select('match', '^USED_BYTES=')
+                 | list | last
+                 | regex_replace('^USED_BYTES=', '') | int }}
+            housekeeping_avail_after: >-
+              {{ housekeeping_after_measurement.stdout_lines
+                 | select('match', '^AVAILABLE_BYTES=')
+                 | list | last
+                 | regex_replace('^AVAILABLE_BYTES=', '') | int }}
+            housekeeping_usage_after: >-
+              {{ housekeeping_after_measurement.stdout_lines
+                 | select('match', '^USAGE_PERCENT=')
+                 | list | last
+                 | regex_replace('^USAGE_PERCENT=', '') | int }}
+            housekeeping_after_stable: >-
+              {{ housekeeping_after_measurement.stdout_lines
+                 | select('match', '^MEASUREMENT_STABLE=')
+                 | list | last
+                 | regex_replace('^MEASUREMENT_STABLE=', '') }}
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
         - name: Determine housekeeping result
@@ -285,49 +371,48 @@
             housekeeping_result_code: >-
               {{ 3 if housekeeping_found_count | int == 0
                  else (2 if housekeeping_failed_count | int > 0
-                 else (2 if housekeeping_deleted_count | int == 0
-                 else 1)) }}
+                 else (1 if housekeeping_deleted_count | int > 0 else 2)) }}
             housekeeping_result_message: >-
               {{ 'NO_FILES_FOUND - No eligible files found.'
                  if housekeeping_found_count | int == 0
                  else ('CLEANUP_ERROR - One or more deletion attempts failed.'
                  if housekeeping_failed_count | int > 0
-                 else ('NO_CHANGE - No files were deleted.'
-                 if housekeeping_deleted_count | int == 0
-                 else ('SUCCESS - Files deleted; utilization remains at or above threshold.'
-                 if housekeeping_usage_after | int >= housekeeping_threshold
-                 else 'SUCCESS - Housekeeping performed successfully.'))) }}
+                 else ('SUCCESS - Files deleted; filesystem utilization is '
+                       ~ (housekeeping_usage_after | string) ~ '%.'
+                 if housekeeping_deleted_count | int > 0
+                 else 'NO_CHANGE - No files were deleted.')) }}
           when: housekeeping_usage_before | int >= housekeeping_threshold
 
         - name: Log final housekeeping summary
           ansible.builtin.lineinfile:
             path: "{{ housekeeping_log }}"
             line: >-
-              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }}
               {{ housekeeping_log_prefix }}:
-              Before={{ housekeeping_usage_before }}%,
-              After={{ housekeeping_usage_after }}%,
-              Found={{ housekeeping_found_count }},
-              Deleted={{ housekeeping_deleted_count }},
-              Failed={{ housekeeping_failed_count }},
-              ExitCode={{ housekeeping_result_code }},
-              Result={{ housekeeping_result_message }}
+              BEFORE={{ housekeeping_usage_before }}%
+              AFTER={{ housekeeping_usage_after }}%
+              USED_BEFORE={{ housekeeping_used_before }}
+              USED_AFTER={{ housekeeping_used_after }}
+              FOUND={{ housekeeping_found_count }}
+              DELETED={{ housekeeping_deleted_count }}
+              FAILED={{ housekeeping_failed_count }}
+              EXIT_CODE={{ housekeeping_result_code }}
+              RESULT={{ housekeeping_result_message }}
             insertafter: EOF
             create: true
             owner: root
             group: root
             mode: "0640"
+          when: housekeeping_usage_before | int >= housekeeping_threshold
 
       rescue:
-
         - name: Capture validation or execution failure
           ansible.builtin.set_fact:
             housekeeping_result_code: >-
               {{ 23 if region_code is not defined or
-                 (region_code | string | upper not in supported_regions)
+                    (region_code | string | upper not in supported_regions)
                  else (21 if housekeeping_dir_stat is not defined or
-                 not (housekeeping_dir_stat.stat.isdir | default(false))
-                 else (22 if (housekeeping_mount.rc | default(1)) != 0
+                    not (housekeeping_dir_stat.stat.isdir | default(false))
                  else 2) }}
             housekeeping_result_message: >-
               Housekeeping failed during validation or execution.
@@ -337,9 +422,9 @@
           ansible.builtin.lineinfile:
             path: "{{ housekeeping_log }}"
             line: >-
-              {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+              {{ now(utc=false, fmt='%Y-%m-%d %H:%M:%S') }}
               {{ housekeeping_log_prefix }}:
-              ERROR - ExitCode={{ housekeeping_result_code }},
+              ERROR EXIT_CODE={{ housekeeping_result_code }}
               {{ housekeeping_result_message }}
             insertafter: EOF
             create: true
@@ -355,7 +440,11 @@
           - "Directory: {{ housekeeping_dir }}"
           - "Mount point: {{ housekeeping_mount.stdout | default('UNKNOWN') | trim }}"
           - "Usage before: {{ housekeeping_usage_before }}%"
+          - "Used bytes before: {{ housekeeping_used_before }}"
+          - "Available bytes before: {{ housekeeping_avail_before }}"
           - "Usage after: {{ housekeeping_usage_after }}%"
+          - "Used bytes after: {{ housekeeping_used_after }}"
+          - "Available bytes after: {{ housekeeping_avail_after }}"
           - "Eligible files found: {{ housekeeping_found_count }}"
           - "Files deleted: {{ housekeeping_deleted_count }}"
           - "Deletion failures: {{ housekeeping_failed_count }}"
