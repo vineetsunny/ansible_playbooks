@@ -1,12 +1,47 @@
-## The intention of this script is to housekeep /opt file system when it reaches 75% and before it turns into an Incident.
-## The script focuses on deleting/zipping files older than specific days provided by patrol, control-m, Storage netbackup, WAS Support & VCS debuginfo 
-## Exit Codes
-## 0 - Housekeeping Not Required, under threshold 
-## 1 - Housekeeping performed
-## 2 - Still Same after Housekeeping 
-## 3 - No Files Found with Criteria
-## 21 - Directory not Present
-## 22 - File System Not Mounted
+# =============================================================================
+# Playbook Name : clean-opt.yml
+# Description   : Performs automated housekeeping of the /opt filesystem on
+#                 Linux systems when filesystem utilization reaches 75%.
+#
+# Purpose       : Helps prevent filesystem capacity issues by deleting or
+#                 compressing eligible files based on retention periods
+#                 defined by the respective support teams.
+#
+# Scope         : Linux servers
+# Target FS     : /opt
+# Threshold     : 75% filesystem utilization
+# File Age      : Based on retention periods provided by the respective teams
+# File Sources  : Patrol, Control-M, Storage NetBackup, WAS Support, and
+#                 VCS debuginfo
+# Action        : Delete or compress eligible files according to the
+#                 configured housekeeping criteria
+# Log File      : /var/log/housekeeping-psd-task.log
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Linux server.
+#   - Privilege escalation (become: true).
+#   - Target filesystem mounted and accessible.
+#   - Appropriate permissions to identify, delete, or compress eligible files.
+#   - Retention periods and file selection criteria defined by the
+#     respective support teams.
+#
+# Execution     : ansible-playbook -i inventory clean-opt.yml
+#
+# Exit Codes:
+#   0  - Housekeeping not required; utilization is below the threshold.
+#   1  - Housekeeping performed.
+#   2  - Filesystem utilization remains unchanged after housekeeping.
+#   3  - No eligible files found for housekeeping.
+#   21 - Target directory not present.
+#   22 - Target filesystem not mounted.
+#
+# Important     : Only files matching the configured housekeeping criteria
+#                 and retention periods should be deleted or compressed.
+#                 Validate file ownership, retention requirements, and
+#                 application dependencies before production execution.
+#
+# Version       : 1.0
+# =============================================================================
 ---
 - name: Housekeep /opt filesystem on Linux VMs
   hosts: linux-test
