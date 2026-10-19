@@ -143,7 +143,7 @@
               Housekeeping not required.
               Utilization is {{ housekeeping_usage_before }}%.
           when: housekeeping_usage_before | int < housekeeping_threshold
-
+          
         - name: Find and delete eligible archive files
           ansible.builtin.shell: |
             set -u
@@ -153,16 +153,6 @@
             prefix={{ housekeeping_log_prefix | quote }}
             age_days={{ housekeeping_age_days | int }}
             cutoff_minutes=$((age_days * 1440))
-
-            patterns=( {{ housekeeping_patterns | map('quote') | join(' ') }} )
-
-            find_args=()
-            for pattern in "${patterns[@]}"; do
-              if ((${#find_args[@]})); then
-                find_args+=(-o)
-              fi
-              find_args+=(-name "$pattern")
-            done
 
             found_count=0
             deleted_count=0
@@ -186,7 +176,13 @@
             done < <(
               find "$dir" -xdev -type f \
                 -mmin +"$cutoff_minutes" \
-                \( "${find_args[@]}" \) -print0
+                \( -name '*.zip' -o \
+                   -name '*.gz'  -o \
+                   -name '*.tar' -o \
+                   -name '*.xz'  -o \
+                   -name '*.bz2' -o \
+                   -name '*.tgz' \) \
+                -print0
             )
 
             printf 'FOUND=%s DELETED=%s FAILED=%s\n' \
