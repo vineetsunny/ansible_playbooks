@@ -1,0 +1,156 @@
+---
+- name: Clean /var filesystem housekeeping
+  hosts: linux-test
+  become: true
+  gather_facts: false
+
+  vars:
+    housekeeping_dir: /var
+    threshold: 65
+    supported_regions:
+      - GB
+      - UK
+      - US
+
+    region: "{{ host_region | default('') }}"
+    logfile: /var/log/dc-tanium-housekeeping-psd-task.1og
+
+    cleanup_dirs:
+      - /var/tmp
+      - /var/cache
+      - /var/spool/clientmqueue
+      - /var/spool/postfix/maildrop
+      - /var/crash
+      - /var/lib
+      - /var/log
+      - /var/log/sa
+
+  tasks:
+    - name: Check whether /var exists
+      ansible.builtin.stat:
+        path: "{{ housekeeping_dir }}"
+      register: var_directory
+
+    - name: Stop if /var does not exist
+      ansible.builtin.debug:
+        msg: "EXIT_CODE=21 - Directory /var is not present"
+      when: not var_directory.stat.exists
+
+    - name: End host when /var does not exist
+      ansible.builtin.meta: end_host
+      when: not var_directory.stat.exists
+
+    - name: Identify the filesystem mounted on /var
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - -n
+          - -o
+          - TARGET
+          - --target
+          - /var
+      register: var_mount
+      changed_when: false
+      failed_when: false
+
+    - name: Stop if /var is not a separate mount point
+      ansible.builtin.debug:
+        msg: "EXIT_CODE=22 - /var is not a separate mount point"
+      when: var_mount.rc != 0 or var_mount.stdout | trim != '/var'
+
+    - name: End host if /var is not a separate mount point
+      ansible.builtin.meta: end_host
+      when: var_mount.rc != 0 or var_mount.stdout | trim != '/var'
+
+    - name: Check supported server region
+      ansible.builtin.debug:
+        msg: "EXIT_CODE=23 - Unsupported or missing region: {{ region }}"
+      when: region | upper not in supported_regions
+
+    - name: End host for unsupported region
+      ansible.builtin.meta: end_host
+      when: region | upper not in supported_regions
+
+    - name: Read /var filesystem usage before cleanup
+      ansible.builtin.command:
+        argv:
+          - df
+          - -P
+          - /var
+      register: df_before
+      changed_when: false
+
+    - name: Calculate usage before cleanup
+      ansible.builtin.set_fact:
+        usage_before: >-
+          {{ df_before.stdout_lines[1].split()[4] | regex_replace('%', '') | int }}
+
+    - name: Skip housekeeping when usage is within threshold
+      ansible.builtin.debug:
+        msg: >-
+          EXIT_CODE=0 - Housekeeping not required.
+          Usage={{ usage_before }}%, Threshold={{ threshold }}%
+      when: usage_before | int <= threshold
+
+    - name: End host when housekeeping is not required
+      ansible.builtin.meta: end_host
+      when: usage_before | int <= threshold
+
+    - name: Ensure housekeeping log exists
+      ansible.builtin.file:
+        path: "{{ logfile }}"
+        state: touch
+        mode: '0640'
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Rotate housekeeping log when larger than 10 MB
+      ansible.builtin.shell: |
+        set -eu
+        if [ -f "{{ logfile }}" ] &&
+           [ "$(du -m "{{ logfile }}" | awk '{print $1}')" -gt 10 ]; then
+          cp -p "{{ logfile }}" "{{ logfile }}.bkp"
+          : > "{{ logfile }}"
+          echo "Housekeeping log rotated"
+        fi
+      args:
+        executable: /bin/bash
+      register: log_rotation
+      changed_when: "'Housekeeping log rotated' in log_rotation.stdout"
+
+    - name: Initialize cleanup counters
+      ansible.builtin.set_fact:
+        cleanup_count: 0
+        cleanup_details: []
+
+    - name: Remove archive files older than 15 days from /var/tmp
+      ansible.builtin.shell: |
+        find /var/tmp -xdev -type f -mtime +15 \
+          \( -name '*.zip' -o -name '*.gz' -o -name '*.tar' \
+          -o -name '*.xz' -o -name '*.bz2' -o -name '*.tgz' \) \
+          -print -delete 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: tmp_cleanup
+      changed_when: tmp_cleanup.stdout_lines | length > 0
+
+    - name: Record /var/tmp cleanup results
+      ansible.builtin.set_fact:
+        cleanup_count: "{{ cleanup_count | int + tmp_cleanup.stdout_lines | length }}"
+        cleanup_details: "{{ cleanup_details + tmp_cleanup.stdout_lines }}"
+      when: tmp_cleanup.stdout_lines | length > 0
+
+    - name: Remove old RPM and SQLite cache files
+      ansible.builtin.shell: |
+        find /var/cache -xdev -type f -mtime +15 \
+          \( -name '*x86_64*rpm' -o -name '*.sqlite*' \) \
+          -print -delete 2>/dev/null || true
+      args:
+        executable: /bin/bash
+      register: cache_cleanup
+      changed_when: cache_cleanup.stdout_lines | length > 0
+
+    - name: Record cache cleanup results
+      ansible.builtin.set_fact:
+        cleanup_count: "{{ cleanup_count | int + cache_cleanup.stdout_lines | length }}"
+       
