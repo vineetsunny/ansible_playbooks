@@ -468,11 +468,6 @@
         var: cleanup_actions
       when: cleanup_actions | length > 0
 
-    - name: Display filesystem measurement samples
-      ansible.builtin.debug:
-        var: measurement_samples
-      when: measurement_samples | length > 0
-
     - name: Append final summary to housekeeping log
       ansible.builtin.lineinfile:
         path: "{{ log_file }}"
