@@ -17,7 +17,7 @@
 
     # Allow delayed filesystem accounting (for example, BTRFS) to settle
     # before calculating the final usage.
-    usage_initial_settle_delay: 15
+    usage_initial_settle_delay: 10
     usage_check_retries: 12
     usage_check_delay: 5
     usage_stable_comparisons: 3
@@ -301,6 +301,11 @@
         # 5. WAIT FOR FILESYSTEM USAGE TO STABILIZE
         # -----------------------------------------------------
 
+        - name: Wait for filesystem accounting to settle
+          ansible.builtin.pause:
+            seconds: "{{ usage_initial_settle_delay }}"
+          changed_when: false
+        
         - name: Sample filesystem usage until stable
           ansible.builtin.shell:
             executable: /bin/bash
