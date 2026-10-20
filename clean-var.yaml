@@ -301,11 +301,6 @@
         # 5. WAIT FOR FILESYSTEM USAGE TO STABILIZE
         # -----------------------------------------------------
 
-        - name: Wait for filesystem accounting to settle
-          ansible.builtin.pause:
-            seconds: "{{ usage_initial_settle_delay }}"
-          changed_when: false
-
         - name: Sample filesystem usage until stable
           ansible.builtin.shell:
             executable: /bin/bash
