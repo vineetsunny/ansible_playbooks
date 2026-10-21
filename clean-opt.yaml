@@ -25,7 +25,7 @@
 #   - Retention periods and file selection criteria defined by the
 #     respective support teams.
 #
-# Execution     : ansible-playbook -i inventory clean-opt.yml
+# Execution : ansible-playbook -i inventory clean-opt.yml
 #
 # Exit Codes:
 #   0  - Housekeeping not required; utilization is below the threshold.
@@ -35,10 +35,6 @@
 #   21 - Target directory not present.
 #   22 - Target filesystem not mounted.
 #
-# Important     : Only files matching the configured housekeeping criteria
-#                 and retention periods should be deleted or compressed.
-#                 Validate file ownership, retention requirements, and
-#                 application dependencies before production execution.
 #
 # Version       : 1.0
 # =============================================================================
@@ -57,6 +53,10 @@
 
     # Set false for discovery/reporting only.
     housekeeping_enabled: true
+
+    # Final execution result and exit code are reported per host.
+    housekeeping_exit_code: 0
+    housekeeping_exit_message: ""
 
     # Keep NetBackup directories excluded from deletion.
     enable_netbackup_cleanup: false
@@ -88,6 +88,45 @@
       loop:
         - "/var/tmp"
         - "/var/log"
+
+    - name: Check that target directory exists
+      ansible.builtin.stat:
+        path: "{{ target_fs }}"
+      register: target_fs_stat
+
+    - name: Report missing target directory
+      ansible.builtin.debug:
+        msg:
+          - "Execution result: Target directory not present."
+          - "Exit code: 21"
+      when: not target_fs_stat.stat.exists
+
+    - name: Stop if target directory is missing
+      ansible.builtin.fail:
+        msg: "HOUSEKEEPING_EXIT_CODE=21: Target directory not present: {{ target_fs }}"
+      when: not target_fs_stat.stat.exists
+
+    - name: Check target filesystem mount
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --mountpoint
+          - "{{ target_fs }}"
+      register: target_mount_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report target filesystem is not mounted
+      ansible.builtin.debug:
+        msg:
+          - "Execution result: Target filesystem not mounted."
+          - "Exit code: 22"
+      when: target_mount_check.rc != 0
+
+    - name: Stop if target filesystem is not mounted
+      ansible.builtin.fail:
+        msg: "HOUSEKEEPING_EXIT_CODE=22: Target filesystem not mounted: {{ target_fs }}"
+      when: target_mount_check.rc != 0
 
     - name: Get initial filesystem usage
       ansible.builtin.command:
@@ -385,6 +424,17 @@
         - housekeeping_candidates | length == 0
         - housekeeping_compress_candidates | length == 0
 
+    - name: Set result when no eligible files were found
+      ansible.builtin.set_fact:
+        housekeeping_status: "NO_ELIGIBLE_FILES"
+        housekeeping_exit_code: 3
+        housekeeping_exit_message: "No eligible files found for housekeeping."
+      when:
+        - usage_before | int > threshold
+        - housekeeping_enabled | bool
+        - housekeeping_candidates | length == 0
+        - housekeeping_compress_candidates | length == 0
+
     - name: Compress eligible WAS logs
       ansible.builtin.shell: |
         set -eu
@@ -558,13 +608,46 @@
         - usage_before | int > threshold
         - housekeeping_enabled | bool
 
-    - name: Determine final housekeeping status
+    - name: Determine final housekeeping status and exit code
       ansible.builtin.set_fact:
         housekeeping_status: >-
           {{
-            'STILL_HIGH'
-            if usage_after | int > threshold
-            else 'HOUSEKEEPING_PERFORMED'
+            'NO_ELIGIBLE_FILES'
+            if (
+              housekeeping_candidates | length == 0
+              and housekeeping_compress_candidates | length == 0
+            )
+            else (
+              'FILESYSTEM_UTILIZATION_UNCHANGED'
+              if usage_after | int == usage_before | int
+              else 'HOUSEKEEPING_PERFORMED'
+            )
+          }}
+        housekeeping_exit_code: >-
+          {{
+            3
+            if (
+              housekeeping_candidates | length == 0
+              and housekeeping_compress_candidates | length == 0
+            )
+            else (
+              2
+              if usage_after | int == usage_before | int
+              else 1
+            )
+          }}
+        housekeeping_exit_message: >-
+          {{
+            'No eligible files found for housekeeping.'
+            if (
+              housekeeping_candidates | length == 0
+              and housekeeping_compress_candidates | length == 0
+            )
+            else (
+              'Filesystem utilization remains unchanged after housekeeping.'
+              if usage_after | int == usage_before | int
+              else 'Housekeeping performed.'
+            )
           }}
       when:
         - usage_before | int > threshold
@@ -595,6 +678,8 @@
           - "Usage after: {{ usage_after }}%"
           - "Threshold: {{ threshold }}%"
           - "Result: {{ housekeeping_status }}"
+          - "Execution result: {{ housekeeping_exit_message }}"
+          - "Exit code: {{ housekeeping_exit_code }}"
           - "Candidate report: {{ find_file_list }}"
           - "Execution log: {{ log_file }}"
       when:
