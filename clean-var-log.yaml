@@ -35,12 +35,6 @@
 #   22 - Target filesystem not mounted.
 #   23 - Region not supported.
 #
-# Important     : Only log files matching the configured size and age criteria
-#                 are eligible for compression. Validate the cleanup criteria
-#                 and confirm that compressed files are handled correctly
-#                 before production execution. Smaller regions and HRC servers
-#                 are excluded from remediation.
-#
 # Version       : 1.0
 # =============================================================================
 
