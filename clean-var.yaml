@@ -1,3 +1,46 @@
+# =============================================================================
+# Playbook Name : clean-var.yml
+# Description   : Performs automated housekeeping of the /var filesystem on
+#                 Linux systems when filesystem utilization reaches 65%.
+#
+# Purpose       : Helps prevent filesystem capacity issues and potential
+#                 incidents by removing eligible old archive files before
+#                 the filesystem reaches critical utilization levels.
+#
+# Scope         : Linux servers in supported regions only
+# Target FS     : /var
+# Threshold     : 65% filesystem utilization
+# File Age      : Older than 15 days
+# File Types    : ZIP and TAR archive files
+# Supported Regions : GB, UK, and US
+# Exclusions    : Smaller regions and HRC servers are not supported by this
+#                 housekeeping script.
+# Action        : Deletes eligible ZIP and TAR archive files older than
+#                 15 days when filesystem utilization reaches the threshold.
+# Log File      : /var/log/dc-tanium-housekeeping-psd-task.log
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Linux server.
+#   - Privilege escalation (become: true).
+#   - Target filesystem mounted and accessible.
+#   - Appropriate permissions to identify and delete eligible archive files.
+#   - Server region validated as GB, UK, or US.
+#   - File age and selection criteria aligned with the housekeeping policy.
+#
+# Execution : ansible-playbook -i inventory housekeeping-var.yml
+#
+# Exit Codes:
+#   0  - Housekeeping not required; utilization is below the threshold.
+#   1  - Housekeeping performed.
+#   2  - Filesystem utilization remains unchanged after housekeeping.
+#   3  - No eligible files found for housekeeping.
+#   21 - Target directory not present.
+#   22 - Target filesystem not mounted.
+#   23 - Server region not supported.
+#
+# Version       : 1.0
+# =============================================================================
+
 ---
 - name: /var filesystem housekeeping with verified summary
   hosts: 
