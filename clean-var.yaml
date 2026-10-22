@@ -43,7 +43,7 @@
 
 ---
 - name: /var filesystem housekeeping with verified summary
-  hosts: 
+  hosts: linux-test
   become: true
   gather_facts: true
 
