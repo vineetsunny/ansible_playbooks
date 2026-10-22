@@ -34,14 +34,13 @@
 # Important     : Files matching the configured cleanup criteria are deleted
 #                 permanently. Validate the file selection criteria and
 #                 filesystem utilization before production execution.
-#                 Smaller regions and HRC servers are excluded from remediation.
 #
 # Version       : 1.0
 # =============================================================================
 
 ---
 - name: Production housekeeping for /var/tmp
-  hosts: all
+  hosts: 
   become: true
   gather_facts: true
   serial: 1
