@@ -40,7 +40,7 @@
 # =============================================================================
 ---
 - name: Housekeep /opt filesystem on Linux VMs
-  hosts: linux-test
+  hosts: 
   become: true
   gather_facts: true
 
