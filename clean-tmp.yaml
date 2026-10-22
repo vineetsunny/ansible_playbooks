@@ -37,7 +37,7 @@
 # =============================================================================
 
 - name: Housekeeping of /tmp filesystem on Linux systems
-  hosts: linux-test
+  hosts: 
   become: true
   gather_facts: true
 
