@@ -93,14 +93,14 @@ df -h /var /var/tmp /var/cache /var/spool
 
 ## Files Matching the criteria:
 
-ls -lr /var/spool/clientmqueue/
-total 3145728
--rw-r--r--. 1 root root 3221225472 Oct  9 16:59 test-old-mail
-ls -lr /var/cache/
-total 15728640
--rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-x86_64-rpm
--rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-housekeeping.sqlite-wal
--rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-housekeeping.sqlite
+ls -lr /var/spool/clientmqueue/</br>
+total 3145728</br>
+-rw-r--r--. 1 root root 3221225472 Oct  9 16:59 test-old-mail</br>
+ls -lr /var/cache/</br>
+total 15728640</br>
+-rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-x86_64-rpm</br>
+-rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-housekeeping.sqlite-wal</br>
+-rw-r--r--. 1 root root 5368709120 Sep 29 16:57 test-housekeeping.sqlite</br>
 
 
 ## Before Space Utilization: 
