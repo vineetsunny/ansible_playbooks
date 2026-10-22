@@ -40,7 +40,7 @@
 
 ---
 - name: Clean-var-log housekeeping
-  hosts: all
+  hosts: 
   become: true
   gather_facts: true
 
