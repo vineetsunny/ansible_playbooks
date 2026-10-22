@@ -47,7 +47,7 @@
 # =============================================================================
 ---
 - name: Housekeeping of /var filesystem on Linux systems
-  hosts: linux-test
+  hosts: 
   become: true
   gather_facts: true
 
