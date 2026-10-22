@@ -1,6 +1,6 @@
 ---
 - name: /var filesystem housekeeping with verified summary
-  hosts: linux-test
+  hosts: 
   become: true
   gather_facts: true
 
