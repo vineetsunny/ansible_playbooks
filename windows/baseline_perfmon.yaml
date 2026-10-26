@@ -1,8 +1,8 @@
 
 ---
 - name: Configure Windows Baseline Performance Monitoring
-  hosts: win-test19
-  gather_facts: false
+  hosts: WIN-BA9MFQOIOCJ
+  gather_facts: true
 
   vars:
     perf_root: 'C:\PerfLogs'
