@@ -1,0 +1,309 @@
+
+---
+- name: Configure Windows Baseline Performance Monitoring
+  hosts: windows_vms
+  gather_facts: false
+
+  vars:
+    perf_root: 'C:\PerfLogs'
+    log_path: 'C:\PerfLogs\Logs'
+    csv_path: 'C:\PerfLogs\Baseline'
+    setup_path: 'C:\PerfLogs\Setup'
+
+    counter_file: 'C:\PerfLogs\Setup\BASELINE.TXT'
+    task_xml: 'C:\PerfLogs\Setup\BaseLine_PerfMon_Task.xml'
+    task_name: 'Baseline Performance Monitoring'
+    collector_name: 'Baseline'
+
+    minimum_free_space_gb: 1.0
+    high_space_threshold_gb: 2.5
+    high_space_retention_days: 30
+    low_space_retention_days: 15
+
+  tasks:
+    - name: Create baseline directories and initialize logging
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $LogPath = '{{ log_path }}'
+          $CSVPath = '{{ csv_path }}'
+          $SetupPath = '{{ setup_path }}'
+
+          foreach ($Path in @($LogPath, $CSVPath, $SetupPath)) {
+              if (-not (Test-Path -LiteralPath $Path)) {
+                  New-Item -Path $Path -ItemType Directory -Force |
+                      Out-Null
+              }
+          }
+
+          $LogFile = Join-Path $LogPath (
+              'BaseLine_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmm')
+          )
+
+          Set-Content -LiteralPath $LogFile -Value (
+              '{0} - Starting Baseline Performance Monitor setup' -f
+              (Get-Date -Format 'yyyy/MM/dd HH:mm:ss')
+          )
+
+          $Ansible.Changed = $true
+          $Ansible.Result = @{ log_file = $LogFile }
+      register: baseline_init
+
+    - name: Check free space and select retention period
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $Disk = Get-CimInstance Win32_LogicalDisk `
+              -Filter "DeviceID='C:'"
+
+          if ($null -eq $Disk) {
+              throw 'Unable to retrieve C: drive information.'
+          }
+
+          $FreeGB = [math]::Round(
+              $Disk.FreeSpace / 1GB, 2
+          )
+
+          if ($FreeGB -lt {{ minimum_free_space_gb }}) {
+              $Age = 0
+              $SkipSetup = $true
+          }
+          elseif ($FreeGB -ge {{ high_space_threshold_gb }}) {
+              $Age = {{ high_space_retention_days }}
+              $SkipSetup = $false
+          }
+          else {
+              $Age = {{ low_space_retention_days }}
+              $SkipSetup = $false
+          }
+
+          $LogFile = '{{ log_path }}\Baseline_Ansible.log'
+
+          Add-Content -LiteralPath $LogFile -Value (
+              '{0} - Free space on C: {1} GB' -f
+              (Get-Date -Format 'yyyy/MM/dd HH:mm:ss'), $FreeGB
+          )
+
+          $Ansible.Result = @{
+              free_space_gb = $FreeGB
+              retention_days = $Age
+              skip_setup = $SkipSetup
+          }
+      register: baseline_space
+
+    - name: Display disk space and retention policy
+      ansible.builtin.debug:
+        msg:
+          - "Free space: {{ baseline_space.result.free_space_gb }} GB"
+          - "Retention: {{ baseline_space.result.retention_days }} days"
+          - "Skip setup: {{ baseline_space.result.skip_setup }}"
+
+    - name: Stop baseline setup when free space is below 1 GB
+      ansible.windows.win_powershell:
+        script: |
+          Add-Content -LiteralPath '{{ log_path }}\Baseline_Ansible.log' `
+            -Value "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Less than 1 GB free; skipping baseline setup."
+      when: baseline_space.result.skip_setup | bool
+
+    - name: Configure monitoring and clean up historical files
+      when: not (baseline_space.result.skip_setup | bool)
+      block:
+
+        - name: Validate required configuration files
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              foreach ($Path in @('{{ counter_file }}', '{{ task_xml }}')) {
+                  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                      throw "Required configuration file not found: $Path"
+                  }
+              }
+
+        - name: Remove previous baseline collector and clean old files
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $LogFile = '{{ log_path }}\Baseline_Ansible.log'
+              $CSVPath = '{{ csv_path }}'
+              $LogPath = '{{ log_path }}'
+              $Age = [int]{{ baseline_space.result.retention_days }}
+
+              function Write-Log {
+                  param([string]$Message)
+                  Add-Content -LiteralPath $LogFile -Value (
+                      '{0} - {1}' -f
+                      (Get-Date -Format 'yyyy/MM/dd HH:mm:ss'), $Message
+                  )
+              }
+
+              # Check and remove an existing collector.
+              $Query = & logman query '{{ collector_name }}' 2>&1
+              $QueryExit = $LASTEXITCODE
+              $CollectorExists = ($QueryExit -eq 0)
+
+              if ($CollectorExists) {
+                  Write-Log 'Existing baseline collector found.'
+
+                  if (($Query | Out-String) -match '(?im)^\s*Status:\s*Running') {
+                      & logman stop '{{ collector_name }}' 2>&1 |
+                          ForEach-Object { Write-Log "$_" }
+                  }
+
+                  & logman delete '{{ collector_name }}' 2>&1 |
+                      ForEach-Object { Write-Log "$_" }
+
+                  if ($LASTEXITCODE -ne 0) {
+                      throw 'Failed to delete the existing baseline collector.'
+                  }
+              }
+              else {
+                  Write-Log 'No existing baseline collector found.'
+              }
+
+              # Remove expired CSV files and log files.
+              $Cutoff = (Get-Date).AddDays(-$Age)
+
+              foreach ($Folder in @($CSVPath, $LogPath)) {
+                  $OldFiles = Get-ChildItem -LiteralPath $Folder `
+                      -File -Recurse -ErrorAction Stop |
+                      Where-Object { $_.LastWriteTime -lt $Cutoff }
+
+                  foreach ($File in $OldFiles) {
+                      Remove-Item -LiteralPath $File.FullName -Force
+                      Write-Log "Removed expired file: $($File.FullName)"
+                  }
+              }
+
+              Write-Log "Cleanup completed using $Age-day retention."
+          register: baseline_cleanup
+
+        - name: Compress previous-day baseline CSV files
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $CSVPath = '{{ csv_path }}'
+              $LogFile = '{{ log_path }}\Baseline_Ansible.log'
+              $Yesterday = (Get-Date).AddDays(-1).ToString('MMdd')
+              $FolderName = '{0}_{1}' -f $env:COMPUTERNAME, $Yesterday
+              $TargetFolder = Join-Path $CSVPath $FolderName
+
+              if (Test-Path -LiteralPath $TargetFolder -PathType Container) {
+                  $Files = Get-ChildItem -LiteralPath $TargetFolder `
+                      -Filter '*.csv' -File
+
+                  foreach ($File in $Files) {
+                      $ZipFile = "$($File.FullName).zip"
+
+                      if (Test-Path -LiteralPath $ZipFile) {
+                          continue
+                      }
+
+                      Compress-Archive -LiteralPath $File.FullName `
+                          -DestinationPath $ZipFile `
+                          -CompressionLevel Fastest
+
+                      if (Test-Path -LiteralPath $ZipFile) {
+                          Remove-Item -LiteralPath $File.FullName -Force
+                          Add-Content -LiteralPath $LogFile -Value (
+                              "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Compressed $($File.FullName)"
+                          )
+                      }
+                  }
+              }
+              else {
+                  Add-Content -LiteralPath $LogFile -Value (
+                      "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Previous-day CSV folder not found: $TargetFolder"
+                  )
+              }
+
+        - name: Enable existing scheduled task or create it from XML
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $TaskName = '{{ task_name }}'
+              $XmlPath = '{{ task_xml }}'
+
+              $Task = Get-ScheduledTask -TaskName $TaskName `
+                  -ErrorAction SilentlyContinue
+
+              if ($null -ne $Task) {
+                  if ($Task.State -eq 'Disabled') {
+                      Enable-ScheduledTask -TaskName $TaskName |
+                          Out-Null
+                  }
+              }
+              else {
+                  Register-ScheduledTask -TaskName $TaskName `
+                      -Xml (Get-Content -LiteralPath $XmlPath -Raw) `
+                      -Force | Out-Null
+              }
+
+              $Task = Get-ScheduledTask -TaskName $TaskName
+              if ($Task.State -eq 'Disabled') {
+                  throw "Scheduled task '$TaskName' remains disabled."
+              }
+
+        - name: Create and start the baseline performance counter set
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $OutputPrefix = Join-Path '{{ csv_path }}' $env:COMPUTERNAME
+
+              & logman create counter '{{ collector_name }}' `
+                  -o $OutputPrefix `
+                  -f csv `
+                  -v mmddhhmm `
+                  -cf '{{ counter_file }}' `
+                  -si 60 `
+                  -sc 1440
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Failed to create the baseline counter set.'
+              }
+
+              & logman start '{{ collector_name }}'
+
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Failed to start the baseline counter set.'
+              }
+
+              Add-Content -LiteralPath '{{ log_path }}\Baseline_Ansible.log' `
+                  -Value "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Baseline collector created and started."
+
+        - name: Validate baseline collector and scheduled task
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $Collector = & logman query '{{ collector_name }}' 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Baseline collector validation failed.'
+              }
+
+              $Task = Get-ScheduledTask -TaskName '{{ task_name }}'
+              if ($Task.State -eq 'Disabled') {
+                  throw 'Baseline scheduled task is disabled.'
+              }
+
+              $Ansible.Result = @{
+                  collector = ($Collector | Out-String).Trim()
+                  task_state = [string]$Task.State
+              }
+          register: baseline_validation
+
+        - name: Display validation result
+          ansible.builtin.debug:
+            var: baseline_validation.result
+
+    - name: Report low disk space outcome
+      ansible.builtin.debug:
+        msg: >-
+          Baseline setup skipped because C: has less than 1 GB free.
+          Review the Windows VM disk space before retrying.
+      when: baseline_space.result.skip_setup | bool
