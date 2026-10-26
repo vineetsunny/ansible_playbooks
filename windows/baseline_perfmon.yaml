@@ -1,7 +1,7 @@
 
 ---
 - name: Configure Windows Baseline Performance Monitoring
-  hosts: WIN-BA9MFQOIOCJ
+  hosts: win-test19
   gather_facts: true
 
   vars:
