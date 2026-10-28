@@ -234,7 +234,7 @@
               $FreeGB = [math]::Round($Disk.FreeSpace / 1GB, 2)
               $Ansible.Result = @{ free_space_post_gb = $FreeGB }
           register: disk_post_cleanup
-
+          
         - name: Compress previous-day baseline CSV files
           ansible.windows.win_powershell:
             script: |
@@ -242,21 +242,16 @@
 
               $CSVPath = '{{ csv_path }}'
               $LogFile = '{{ log_path }}\Baseline_Ansible.log'
-              $Yesterday = (Get-Date).AddDays(-1).ToString('MMdd')
-              $FolderName = '{0}_{1}' -f $env:COMPUTERNAME, $Yesterday
-              $TargetFolder = Join-Path $CSVPath $FolderName
+              $TodayStart = (Get-Date).Date
 
-              if (Test-Path -LiteralPath $TargetFolder -PathType Container) {
-                  $Files = Get-ChildItem -LiteralPath $TargetFolder `
-                      -Filter '*.csv' -File
+              # Find all CSV files written before today that haven't been compressed yet
+              $OldCsvFiles = Get-ChildItem -LiteralPath $CSVPath -Filter '*.csv' -File -Recurse |
+                  Where-Object { $_.LastWriteTime -lt $TodayStart }
 
-                  foreach ($File in $Files) {
-                      $ZipFile = "$($File.FullName).zip"
+              foreach ($File in $OldCsvFiles) {
+                  $ZipFile = "$($File.FullName).zip"
 
-                      if (Test-Path -LiteralPath $ZipFile) {
-                          continue
-                      }
-
+                  if (-not (Test-Path -LiteralPath $ZipFile)) {
                       Compress-Archive -LiteralPath $File.FullName `
                           -DestinationPath $ZipFile `
                           -CompressionLevel Fastest
@@ -264,17 +259,13 @@
                       if (Test-Path -LiteralPath $ZipFile) {
                           Remove-Item -LiteralPath $File.FullName -Force
                           Add-Content -LiteralPath $LogFile -Value (
-                              "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Compressed $($File.FullName)"
+                              "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Compressed and archived: $($File.FullName) -> $ZipFile"
                           )
                       }
                   }
               }
-              else {
-                  Add-Content -LiteralPath $LogFile -Value (
-                      "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Previous-day CSV folder not found: $TargetFolder"
-                  )
-              }
-
+         
+        
         - name: Enable existing scheduled task or create it from XML
           ansible.windows.win_powershell:
             script: |
