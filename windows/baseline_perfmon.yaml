@@ -1,4 +1,4 @@
-
+#Automate Windows VM baseline performance monitoring by collecting CPU, memory, and disk metrics, managing historical log retention and compression, and reporting the latest performance statistics.
 ---
 - name: Configure Windows Baseline Performance Monitoring
   hosts: win-test19
@@ -301,9 +301,9 @@
               }
           register: baseline_validation
 
-        - name: Display validation result
-          ansible.builtin.debug:
-            var: baseline_validation.result
+       # - name: Display validation result
+       #   ansible.builtin.debug:
+       #     var: baseline_validation.result
 
         - name: Wait for collector to write initial sample
           ansible.builtin.pause:
