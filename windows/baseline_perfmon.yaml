@@ -4,10 +4,6 @@
   hosts: win-test19
   gather_facts: false
 
-- name: Test Windows VM connectivity
-  hosts: win-test19
-  gather_facts: false
-
   tasks:
     - name: Test WinRM connection
       ansible.windows.win_ping:
