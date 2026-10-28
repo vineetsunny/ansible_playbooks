@@ -1,5 +1,45 @@
-# Automate Windows VM baseline performance monitoring by collecting disk metrics,
-# managing historical log retention and compression, and reporting the latest performance statistics.
+# =============================================================================
+# Playbook Name : baseline-perf-mon.yaml
+# Description   : Automates baseline performance monitoring on Windows VMs,
+#                 including disk-space checks, historical file cleanup,
+#                 CSV compression, and performance reporting.
+#
+# Purpose       : Maintain Windows VM performance monitoring while managing
+#                 disk space through retention-based cleanup and compression.
+#
+# Scope         : Windows servers / VMs
+# Target FS     : C:
+# Retention     : 30 days when free space is >= 2.5 GB;
+#                 15 days when free space is >= 1 GB and < 2.5 GB.
+# Compression   : Previous-day baseline CSV files
+# Collection    : Every 60 seconds, up to 1,440 samples (24 hours)
+# Collector     : Baseline
+# Scheduled Task: Baseline Performance Monitoring (daily trigger)
+# Output Path   : C:\PerfLogs\Baseline
+# Log Path      : C:\PerfLogs\Logs
+# Setup Path    : C:\PerfLogs\Setup
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Windows VM through WinRM.
+#   - Required PowerShell and Windows Performance Monitor utilities.
+#   - Required configuration files:
+#       C:\PerfLogs\Setup\BASELINE.TXT
+#       C:\PerfLogs\Setup\BaseLine_PerfMon_Task.xml
+#   - Appropriate permissions to configure the collector, scheduled task,
+#     and delete or compress monitoring files.
+#
+# Execution     : ansible-playbook -i inventory windows-baseline-monitoring.yml
+#
+# Important     : If C: has less than 1 GB free, monitoring setup and
+#                 maintenance are skipped. Cleanup and compression run when
+#                 the Ansible playbook executes; the Windows scheduled task
+#                 only attempts to start the performance collector daily.
+#                 Files older than the selected retention period are
+#                 permanently deleted from the configured cleanup folders.
+#
+# Version       : 1.0
+# =============================================================================
+
 ---
 - name: Configure Windows Baseline Performance Monitoring
   hosts: win-test19
