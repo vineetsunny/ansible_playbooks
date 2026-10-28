@@ -361,19 +361,17 @@
                   metrics     = $FormattedSamples
               }
           register: baseline_summary
-
+          
         - name: Display formatted baseline performance metrics
           ansible.builtin.debug:
             msg:
               - "================ BASELINE PERFORMANCE SUMMARY ================"
               - "Log File: {{ baseline_summary.result.source_file }}"
               - "------------------------------------------------------------"
-              - "{{ '%-24s | %-8s | %-12s | %-10s | %-10s' | format('Timestamp', 'CPU (%)', 'Free RAM(MB)', 'RAM Used(%)', 'Disk Free(%)') }}"
+              - "{{ '%-24s | %-8s | %-12s | %-11s | %-10s' | format('Timestamp', 'CPU (%)', 'Free RAM(MB)', 'RAM Used(%)', 'Disk Free(%)') }}"
               - "------------------------------------------------------------"
-              - "{% for row in baseline_summary.result.metrics %}
-{{ '%-24s | %-8s | %-12s | %-10s | %-10s' | format(row.Timestamp, row.CPU_Usage_Pct, row.Free_RAM_MB, row.RAM_Used_Pct, row.Disk_Free_Pct) }}
-{% endfor %}"
-              - "============================================================"
+              - "{% for row in baseline_summary.result.metrics %}{{ '%-24s | %-8s | %-12s | %-11s | %-10s\n' | format(row.Timestamp, row.CPU_Usage_Pct, row.Free_RAM_MB, row.RAM_Used_Pct, row.Disk_Free_Pct) }}{% endfor %}"
+              - "============================================================"    
     
     - name: Report low disk space outcome
       ansible.builtin.debug:
