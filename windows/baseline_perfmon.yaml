@@ -313,7 +313,7 @@
           ansible.builtin.pause:
             seconds: 65
 
-        - name: Parse and format latest baseline performance metrics
+        - name: Parse latest single baseline performance metric
           ansible.windows.win_powershell:
             script: |
               $ErrorActionPreference = 'Stop'
@@ -337,42 +337,36 @@
 
               $Data = @(Import-Csv -LiteralPath $LatestFile.FullName)
               if ($Data.Count -eq 0) {
-                  $Ansible.Result = @{
-                      source_file = $LatestFile.Name
-                      metrics     = @()
-                  }
+                  $Ansible.Result = @{ status = "empty" }
                   return
               }
 
               $Cols = $Data[0].PSObject.Properties.Name
-
-              $FormattedSamples = @($Data | Select-Object -Last 5 | ForEach-Object {
-                  [ordered]@{
-                      "Timestamp"     = $_.$($Cols[0])
-                      "CPU_Usage_Pct" = To-Double $_.$($Cols[1]) 2
-                      "Free_RAM_MB"   = [int](To-Double $_.$($Cols[2]) 0)
-                      "RAM_Used_Pct"  = To-Double $_.$($Cols[3]) 2
-                      "Disk_Free_Pct" = To-Double $_.$($Cols[4]) 1
-                  }
-              })
+              # Grab ONLY the most recent single row
+              $LatestRow = $Data | Select-Object -Last 1
 
               $Ansible.Result = @{
-                  source_file = $LatestFile.Name
-                  metrics     = $FormattedSamples
+                  source_file   = $LatestFile.Name
+                  timestamp     = [string]$LatestRow.$($Cols[0])
+                  cpu_usage_pct = To-Double $LatestRow.$($Cols[1]) 2
+                  free_ram_mb   = [int](To-Double $LatestRow.$($Cols[2]) 0)
+                  ram_used_pct  = To-Double $LatestRow.$($Cols[3]) 2
+                  disk_free_pct = To-Double $LatestRow.$($Cols[4]) 1
               }
           register: baseline_summary
-          
+
         - name: Display formatted baseline performance metrics
           ansible.builtin.debug:
             msg:
-              - "================ BASELINE PERFORMANCE SUMMARY ================"
-              - "Log File: {{ baseline_summary.result.source_file }}"
-              - "------------------------------------------------------------"
-              - "{{ '%-24s | %-8s | %-12s | %-11s | %-10s' | format('Timestamp', 'CPU (%)', 'Free RAM(MB)', 'RAM Used(%)', 'Disk Free(%)') }}"
-              - "------------------------------------------------------------"
-              - "{% for row in baseline_summary.result.metrics %}{{ '%-24s | %-8s | %-12s | %-11s | %-10s\n' | format(row.Timestamp, row.CPU_Usage_Pct, row.Free_RAM_MB, row.RAM_Used_Pct, row.Disk_Free_Pct) }}{% endfor %}"
-              - "============================================================"    
-    
+              - "================ LATEST BASELINE METRIC ================"
+              - "Log File : {{ baseline_summary.result.source_file }}"
+              - "Timestamp: {{ baseline_summary.result.timestamp }}"
+              - "CPU Usage: {{ baseline_summary.result.cpu_usage_pct }} %"
+              - "Free RAM : {{ baseline_summary.result.free_ram_mb }} MB"
+              - "RAM Used : {{ baseline_summary.result.ram_used_pct }} %"
+              - "C: Free  : {{ baseline_summary.result.disk_free_pct }} %"
+              - "========================================================"
+              
     - name: Report low disk space outcome
       ansible.builtin.debug:
         msg: >-
