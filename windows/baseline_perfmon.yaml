@@ -318,6 +318,15 @@
             script: |
               $ErrorActionPreference = 'Stop'
 
+              function To-Double ($val, $decimals = 2) {
+                  $clean = "$val".Trim()
+                  $out = 0.0
+                  if ([double]::TryParse($clean, [ref]$out)) {
+                      return [math]::Round($out, $decimals)
+                  }
+                  return 0.0
+              }
+
               $LatestFile = Get-ChildItem -LiteralPath '{{ csv_path }}' -Filter '*.csv' -File |
                   Sort-Object LastWriteTime -Descending |
                   Select-Object -First 1
@@ -326,26 +335,26 @@
                   throw "No baseline CSV file found in {{ csv_path }}"
               }
 
-              $Data = Import-Csv -LiteralPath $LatestFile.FullName
+              $Data = @(Import-Csv -LiteralPath $LatestFile.FullName)
               if ($Data.Count -eq 0) {
-                  $Ansible.Result = @{ 
+                  $Ansible.Result = @{
                       source_file = $LatestFile.Name
-                      metrics = @() 
+                      metrics     = @()
                   }
                   return
               }
 
               $Cols = $Data[0].PSObject.Properties.Name
 
-              $FormattedSamples = $Data | Select-Object -Last 5 | ForEach-Object {
+              $FormattedSamples = @($Data | Select-Object -Last 5 | ForEach-Object {
                   [ordered]@{
-                      "Timestamp"    = $_.$($Cols[0])
-                      "CPU_Usage_Pct"= [math]::Round([double]$_.$($Cols[1]), 2)
-                      "Free_RAM_MB"  = [int]$_.$($Cols[2])
-                      "RAM_Used_Pct" = [math]::Round([double]$_.$($Cols[3]), 2)
-                      "Disk_Free_Pct"= [math]::Round([double]$_.$($Cols[4]), 1)
+                      "Timestamp"     = $_.$($Cols[0])
+                      "CPU_Usage_Pct" = To-Double $_.$($Cols[1]) 2
+                      "Free_RAM_MB"   = [int](To-Double $_.$($Cols[2]) 0)
+                      "RAM_Used_Pct"  = To-Double $_.$($Cols[3]) 2
+                      "Disk_Free_Pct" = To-Double $_.$($Cols[4]) 1
                   }
-              }
+              })
 
               $Ansible.Result = @{
                   source_file = $LatestFile.Name
