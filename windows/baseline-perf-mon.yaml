@@ -12,7 +12,6 @@
 # Retention     : 30 days when free space is >= 2.5 GB;
 #                 15 days when free space is >= 1 GB and < 2.5 GB.
 # Compression   : Previous-day baseline CSV files
-# Collection    : Every 60 seconds, up to 1,440 samples (24 hours)
 # Collector     : Baseline
 # Scheduled Task: Baseline Performance Monitoring (daily trigger)
 # Output Path   : C:\PerfLogs\Baseline
