@@ -351,4 +351,3 @@
           - "Failed actions: {{ fluentbit_uninstall_result.result.FailureCount }}"
           - "Actions attempted: {{ fluentbit_uninstall_result.result.ActionsAttempted }}"
           - "Details: {{ fluentbit_uninstall_result.result.Messages }}"
-```
