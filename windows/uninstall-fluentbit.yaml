@@ -1,4 +1,54 @@
-```yaml
+# =============================================================================
+# Playbook Name : uninstall-fluentbit.yaml
+# Description   : Automates the uninstallation of the Fluent Bit agent from
+#                 Windows servers, including environment variable removal
+#                 and cleanup of Fluent Bit installation and source directories.
+#
+# Purpose       : Remove the Fluent Bit agent and its associated files and
+#                 environment variables from Windows servers during
+#                 the decommissioning process.
+#
+# Scope         : Windows servers / VMs
+# Application   : Fluent Bit
+# Install Path  : C:\Program Files\td-agent-bit
+# Config Path   : C:\Program Files\td-agent-bit\conf\company
+# Config Pattern: upstream*.conf
+# Source Path   : C:\Windows\Build\Scripts\Fluent*
+# Server Names  : Vmserver1, Vmserver2
+#
+# Environment Variables:
+#   - PUPPET-FLUENTBIT1.8.11-PAYLOAD
+#   - PUPPET-FLUENTBIT1.8.11-INSTALL
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Windows servers through WinRM.
+#   - Appropriate Windows administrator privileges.
+#   - The ansible.windows collection installed on the Ansible control node.
+#   - Fluent Bit installed using an MSI package for the current uninstall
+#     implementation.
+#   - Access to the Fluent Bit configuration and installation directories.
+#
+# Execution     : ansible-playbook -i inventory.ini uninstall_fluentbit.yaml
+#
+# Important     : Uninstallation and cleanup are performed only when Fluent
+#                 Bit is installed, a matching configuration file exists,
+#                 and at least one predefined server name is found.
+#                 The playbook removes the specified machine-level environment
+#                 variables, installation directory, and matching source
+#                 directories when present.
+#                 Non-MSI installations require a vendor-specific uninstall
+#                 command. Validate the configuration matching criteria and
+#                 directory cleanup paths before production execution.
+#
+# Exit Codes    : 0  - No remediation required or no action taken
+#                 1  - All attempted remediation actions succeeded
+#                 2  - Partial success
+#                 3  - All attempted remediation actions failed
+#                 20 - Unexpected execution error
+#
+# Version       : 1.0
+# =============================================================================
+
 ---
 - name: Uninstall Fluent Bit agent from Windows servers
   hosts: windows
