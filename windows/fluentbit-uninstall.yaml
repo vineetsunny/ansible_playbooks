@@ -1,0 +1,304 @@
+```yaml
+---
+- name: Uninstall Fluent Bit agent from Windows servers
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+    - name: Check configuration and uninstall Fluent Bit
+      ansible.windows.win_powershell:
+        script: |
+          $ErrorActionPreference = 'Stop'
+
+          $fluentInstallPath = 'C:\Program Files\td-agent-bit'
+          $fluentConfigPath  = 'C:\Program Files\td-agent-bit\conf\company'
+          $fluentSourcePath  = 'C:\Windows\Build\Scripts'
+          $serverNames = @(
+              'Vmserver1',
+              'Vmserver2'
+          )
+
+          $envVars = @(
+              'PUPPET-FLUENTBIT1.8.11-PAYLOAD',
+              'PUPPET-FLUENTBIT1.8.11-INSTALL'
+          )
+
+          $successCount = 0
+          $failureCount = 0
+          $actionsAttempted = 0
+          $messages = @()
+          $exitCode = 0
+
+          try {
+              # Step 1: Check whether Fluent Bit is installed.
+              # Win32_Product is avoided because querying it can
+              # trigger Windows Installer consistency checks.
+
+              $uninstallKeys = @(
+                  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+              )
+
+              $installedProducts = @(
+                  Get-ItemProperty -Path $uninstallKeys `
+                      -ErrorAction SilentlyContinue |
+                  Where-Object {
+                      $_.DisplayName -like 'Fluent*'
+                  }
+              )
+
+              if ($installedProducts.Count -eq 0) {
+                  $messages += 'Fluent Bit is not installed. No action required.'
+              }
+              else {
+                  # Step 2: Find Fluent Bit configuration files.
+                  $configFiles = @(
+                      Get-ChildItem -Path $fluentConfigPath `
+                          -Filter 'upstream*.conf' `
+                          -File `
+                          -ErrorAction SilentlyContinue
+                  )
+
+                  if ($configFiles.Count -eq 0) {
+                      $messages += 'Configuration file not found. No action taken.'
+                  }
+                  else {
+                      # Step 3: Search configuration content for
+                      # the configured Fluent Bit server names.
+                      $matchFound = $false
+
+                      foreach ($configFile in $configFiles) {
+                          $configContent = Get-Content `
+                              -LiteralPath $configFile.FullName
+
+                          foreach ($server in $serverNames) {
+                              if ($configContent -match [regex]::Escape($server)) {
+                                  $matchFound = $true
+                                  $messages += "Server '$server' found in $($configFile.Name)."
+                                  break
+                              }
+                          }
+
+                          if ($matchFound) {
+                              break
+                          }
+                      }
+
+                      if (-not $matchFound) {
+                          $messages += 'No matching server names found. No action taken.'
+                      }
+                      else {
+                          # Step 4: Uninstall Fluent Bit.
+                          foreach ($product in $installedProducts) {
+                              $actionsAttempted++
+
+                              try {
+                                  $uninstallString = $product.UninstallString
+
+                                  if ([string]::IsNullOrWhiteSpace($uninstallString)) {
+                                      throw "Uninstall command is missing for $($product.DisplayName)."
+                                  }
+
+                                  # MSI products can be uninstalled quietly.
+                                  if ($uninstallString -match '(?i)msiexec(?:\.exe)?') {
+                                      $productCode = $null
+
+                                      if ($uninstallString -match '\{[0-9A-Fa-f-]{36}\}') {
+                                          $productCode = $Matches[0]
+                                      }
+
+                                      if (-not $productCode) {
+                                          throw "MSI product code not found for $($product.DisplayName)."
+                                      }
+
+                                      $process = Start-Process `
+                                          -FilePath 'msiexec.exe' `
+                                          -ArgumentList @(
+                                              '/x',
+                                              $productCode,
+                                              '/qn',
+                                              '/norestart'
+                                          ) `
+                                          -Wait `
+                                          -PassThru
+
+                                      if ($process.ExitCode -notin @(0, 3010)) {
+                                          throw "MSI uninstall returned exit code $($process.ExitCode)."
+                                      }
+                                  }
+                                  else {
+                                      throw "Non-MSI uninstall requires a vendor-specific silent uninstall command: $uninstallString"
+                                  }
+
+                                  # Verify that the product is no longer registered.
+                                  $stillInstalled = @(
+                                      Get-ItemProperty -Path $uninstallKeys `
+                                          -ErrorAction SilentlyContinue |
+                                      Where-Object {
+                                          $_.DisplayName -eq $product.DisplayName
+                                      }
+                                  )
+
+                                  if ($stillInstalled.Count -eq 0) {
+                                      $successCount++
+                                      $messages += "Successfully uninstalled $($product.DisplayName)."
+                                  }
+                                  else {
+                                      throw "$($product.DisplayName) remains registered after uninstall."
+                                  }
+                              }
+                              catch {
+                                  $failureCount++
+                                  $messages += "Failed to uninstall $($product.DisplayName): $($_.Exception.Message)"
+                              }
+                          }
+
+                          # Step 5: Remove machine-level environment variables.
+                          foreach ($envVar in $envVars) {
+                              try {
+                                  $currentValue = [Environment]::GetEnvironmentVariable(
+                                      $envVar,
+                                      'Machine'
+                                  )
+
+                                  if ($null -ne $currentValue) {
+                                      $actionsAttempted++
+
+                                      [Environment]::SetEnvironmentVariable(
+                                          $envVar,
+                                          $null,
+                                          'Machine'
+                                      )
+
+                                      $verifyValue = [Environment]::GetEnvironmentVariable(
+                                          $envVar,
+                                          'Machine'
+                                      )
+
+                                      if ($null -eq $verifyValue) {
+                                          $successCount++
+                                          $messages += "Removed machine environment variable: $envVar"
+                                      }
+                                      else {
+                                          $failureCount++
+                                          $messages += "Failed to remove machine environment variable: $envVar"
+                                      }
+                                  }
+                                  else {
+                                      $messages += "Environment variable already absent: $envVar"
+                                  }
+                              }
+                              catch {
+                                  $failureCount++
+                                  $messages += "Failed to remove environment variable $envVar`: $($_.Exception.Message)"
+                              }
+                          }
+
+                          # Step 6: Remove Fluent Bit installation directory.
+                          if (Test-Path -LiteralPath $fluentInstallPath) {
+                              $actionsAttempted++
+
+                              try {
+                                  Remove-Item -LiteralPath $fluentInstallPath `
+                                      -Recurse -Force
+
+                                  if (-not (Test-Path -LiteralPath $fluentInstallPath)) {
+                                      $successCount++
+                                      $messages += "Removed installation directory: $fluentInstallPath"
+                                  }
+                                  else {
+                                      $failureCount++
+                                      $messages += "Installation directory still exists: $fluentInstallPath"
+                                  }
+                              }
+                              catch {
+                                  $failureCount++
+                                  $messages += "Failed to remove installation directory: $($_.Exception.Message)"
+                              }
+                          }
+                          else {
+                              $messages += 'Installation directory already absent.'
+                          }
+
+                          # Step 7: Remove Fluent Bit source directories.
+                          $sourceDirectories = @(
+                              Get-ChildItem -Path $fluentSourcePath `
+                                  -Directory `
+                                  -Filter 'Fluent*' `
+                                  -ErrorAction SilentlyContinue
+                          )
+
+                          foreach ($sourceDirectory in $sourceDirectories) {
+                              $actionsAttempted++
+
+                              try {
+                                  Remove-Item -LiteralPath $sourceDirectory.FullName `
+                                      -Recurse -Force
+
+                                  if (-not (Test-Path -LiteralPath $sourceDirectory.FullName)) {
+                                      $successCount++
+                                      $messages += "Removed source directory: $($sourceDirectory.FullName)"
+                                  }
+                                  else {
+                                      $failureCount++
+                                      $messages += "Source directory still exists: $($sourceDirectory.FullName)"
+                                  }
+                              }
+                              catch {
+                                  $failureCount++
+                                  $messages += "Failed to remove source directory $($sourceDirectory.FullName): $($_.Exception.Message)"
+                              }
+                          }
+
+                          if ($sourceDirectories.Count -eq 0) {
+                              $messages += 'No matching Fluent Bit source directories found.'
+                          }
+
+                          # Step 8: Determine final remediation exit code.
+                          if (($successCount -gt 0) -and ($failureCount -eq 0)) {
+                              $exitCode = 1
+                          }
+                          elseif (($successCount -gt 0) -and ($failureCount -gt 0)) {
+                              $exitCode = 2
+                          }
+                          elseif (($successCount -eq 0) -and ($failureCount -gt 0)) {
+                              $exitCode = 3
+                          }
+                          else {
+                              $exitCode = 0
+                          }
+                      }
+                  }
+              }
+          }
+          catch {
+              $exitCode = 20
+              $messages += "Execution error: $($_.Exception.Message)"
+          }
+
+          # Return a structured result to Ansible.
+          $Ansible.Result = @{
+              ExitCode          = $exitCode
+              SuccessCount      = $successCount
+              FailureCount      = $failureCount
+              ActionsAttempted  = $actionsAttempted
+              Messages          = @($messages)
+          }
+
+          $Ansible.Changed = ($actionsAttempted -gt 0)
+
+          # Treat partial success, total failure and execution errors
+          # as failed Ansible tasks. Exit code 0 and 1 are successful.
+          $Ansible.Failed = ($exitCode -in @(2, 3, 20))
+
+      register: fluentbit_uninstall_result
+
+    - name: Display Fluent Bit remediation summary
+      ansible.builtin.debug:
+        msg:
+          - "Exit code: {{ fluentbit_uninstall_result.result.ExitCode }}"
+          - "Successful actions: {{ fluentbit_uninstall_result.result.SuccessCount }}"
+          - "Failed actions: {{ fluentbit_uninstall_result.result.FailureCount }}"
+          - "Actions attempted: {{ fluentbit_uninstall_result.result.ActionsAttempted }}"
+          - "Details: {{ fluentbit_uninstall_result.result.Messages }}"
+```
