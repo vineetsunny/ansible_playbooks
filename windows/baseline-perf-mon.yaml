@@ -38,15 +38,10 @@
 #
 # Version       : 1.0
 # =============================================================================
-
 ---
 - name: Configure Windows Baseline Performance Monitoring
   hosts: win-test19
   gather_facts: false
-
-  tasks:
-    - name: Test WinRM connection
-      ansible.windows.win_ping:
 
   vars:
     perf_root: 'C:\PerfLogs'
@@ -65,348 +60,180 @@
     low_space_retention_days: 15
 
   tasks:
-    - name: Create baseline directories and initialize logging
+    - name: Test WinRM connectivity
+      ansible.windows.win_ping:
+
+    - name: Ensure required directory structure exists
+      ansible.windows.win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ perf_root }}"
+        - "{{ log_path }}"
+        - "{{ csv_path }}"
+        - "{{ setup_path }}"
+
+    - name: Execute disk health check, cleanup, and file compression
       ansible.windows.win_powershell:
         script: |
           $ErrorActionPreference = 'Stop'
-
-          $LogPath = '{{ log_path }}'
-          $CSVPath = '{{ csv_path }}'
-          $SetupPath = '{{ setup_path }}'
-
-          foreach ($Path in @($LogPath, $CSVPath, $SetupPath)) {
-              if (-not (Test-Path -LiteralPath $Path)) {
-                  New-Item -Path $Path -ItemType Directory -Force |
-                      Out-Null
-              }
-          }
-
-          $LogFile = Join-Path $LogPath (
-              'BaseLine_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmm')
-          )
-
-          Set-Content -LiteralPath $LogFile -Value (
-              '{0} - Starting Baseline Performance Monitor setup' -f
-              (Get-Date -Format 'yyyy/MM/dd HH:mm:ss')
-          )
-
-          $Ansible.Changed = $true
-          $Ansible.Result = @{ log_file = $LogFile }
-      register: baseline_init
-
-    - name: Check free space and select retention period
-      ansible.windows.win_powershell:
-        script: |
-          $ErrorActionPreference = 'Stop'
-
-          $Disk = Get-CimInstance Win32_LogicalDisk `
-              -Filter "DeviceID='C:'"
-
-          if ($null -eq $Disk) {
-              throw 'Unable to retrieve C: drive information.'
-          }
-
-          $FreeGB = [math]::Round(
-              $Disk.FreeSpace / 1GB, 2
-          )
-
-          if ($FreeGB -lt {{ minimum_free_space_gb }}) {
-              $Age = 0
-              $SkipSetup = $true
-          }
-          elseif ($FreeGB -ge {{ high_space_threshold_gb }}) {
-              $Age = {{ high_space_retention_days }}
-              $SkipSetup = $false
-          }
-          else {
-              $Age = {{ low_space_retention_days }}
-              $SkipSetup = $false
-          }
 
           $LogFile = '{{ log_path }}\Baseline_Ansible.log'
+          function Write-Log ($msg) {
+              Add-Content -LiteralPath $LogFile -Value "$((Get-Date).ToString('yyyy/MM/dd HH:mm:ss')) - $msg"
+          }
 
-          Add-Content -LiteralPath $LogFile -Value (
-              '{0} - Free space on C: {1} GB' -f
-              (Get-Date -Format 'yyyy/MM/dd HH:mm:ss'), $FreeGB
-          )
+          # 1. Evaluate Initial Free Space
+          $Disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          if (-not $Disk) { throw 'Unable to query C: drive.' }
+          $FreeGB = [math]::Round($Disk.FreeSpace / 1GB, 2)
+
+          $Age = if ($FreeGB -ge {{ high_space_threshold_gb }}) {
+              {{ high_space_retention_days }}
+          } else {
+              {{ low_space_retention_days }}
+          }
+
+          Write-Log "Initial free space: $FreeGB GB. Retention window: $Age days."
+
+          # 2. Clean Expired Files (CSV, ZIP, LOG)
+          $Cutoff = (Get-Date).AddDays(-$Age)
+          foreach ($Dir in @('{{ csv_path }}', '{{ log_path }}')) {
+              Get-ChildItem -LiteralPath $Dir -File -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_.LastWriteTime -lt $Cutoff } |
+                  ForEach-Object {
+                      Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                      Write-Log "Removed expired artifact: $($_.FullName)"
+                  }
+          }
+
+          # 3. Compress Historical CSVs
+          $Today = (Get-Date).Date
+          $OldCsvs = Get-ChildItem -LiteralPath '{{ csv_path }}' -Filter '*.csv' -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.LastWriteTime -lt $Today }
+
+          foreach ($File in $OldCsvs) {
+              $Zip = "$($File.FullName).zip"
+              if (-not (Test-Path -LiteralPath $Zip)) {
+                  Compress-Archive -LiteralPath $File.FullName -DestinationPath $Zip -CompressionLevel Fastest
+                  if (Test-Path -LiteralPath $Zip) {
+                      Remove-Item -LiteralPath $File.FullName -Force
+                      Write-Log "Compressed archive: $($File.FullName) -> $Zip"
+                  }
+              }
+          }
+
+          # 4. Check Post-Cleanup Capacity
+          $PostDisk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+          $PostFreeGB = [math]::Round($PostDisk.FreeSpace / 1GB, 2)
+          $CanSetup = $PostFreeGB -ge {{ minimum_free_space_gb }}
 
           $Ansible.Result = @{
-              free_space_gb = $FreeGB
-              retention_days = $Age
-              skip_setup = $SkipSetup
+              initial_free_gb = $FreeGB
+              post_free_gb    = $PostFreeGB
+              retention_days  = $Age
+              can_proceed     = $CanSetup
           }
-      register: baseline_space
+      register: maintenance_result
 
-    - name: Display disk space and retention policy
+    - name: Fail or notify if capacity is below minimum threshold
       ansible.builtin.debug:
-        msg:
-          - "Free space: {{ baseline_space.result.free_space_gb }} GB"
-          - "Retention: {{ baseline_space.result.retention_days }} days"
-          - "Skip setup: {{ baseline_space.result.skip_setup }}"
+        msg: >-
+          Disk space is critically low ({{ maintenance_result.result.post_free_gb }} GB free).
+          Minimum {{ minimum_free_space_gb }} GB required. Setup aborted.
+      when: not (maintenance_result.result.can_proceed | bool)
 
-    - name: Stop baseline setup when free space is below 1 GB
-      ansible.windows.win_powershell:
-        script: |
-          Add-Content -LiteralPath '{{ log_path }}\Baseline_Ansible.log' `
-            -Value "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Less than 1 GB free; skipping baseline setup."
-      when: baseline_space.result.skip_setup | bool
-
-    - name: Configure monitoring and clean up historical files
-      when: not (baseline_space.result.skip_setup | bool)
+    - name: Configure baseline collector and scheduled task
+      when: maintenance_result.result.can_proceed | bool
       block:
-
-        - name: Validate required configuration files
+        - name: Verify setup asset presence
           ansible.windows.win_powershell:
             script: |
               $ErrorActionPreference = 'Stop'
-
               foreach ($Path in @('{{ counter_file }}', '{{ task_xml }}')) {
                   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-                      throw "Required configuration file not found: $Path"
+                      throw "Required configuration asset missing: $Path"
                   }
               }
 
-        - name: Remove previous baseline collector and clean old files
-          ansible.windows.win_powershell:
-            script: |
-              $ErrorActionPreference = 'Stop'
-
-              $LogFile = '{{ log_path }}\Baseline_Ansible.log'
-              $CSVPath = '{{ csv_path }}'
-              $LogPath = '{{ log_path }}'
-              $Age = [int]{{ baseline_space.result.retention_days }}
-
-              function Write-Log {
-                  param([string]$Message)
-                  Add-Content -LiteralPath $LogFile -Value (
-                      '{0} - {1}' -f
-                      (Get-Date -Format 'yyyy/MM/dd HH:mm:ss'), $Message
-                  )
-              }
-
-              # Check and remove an existing collector.
-              $Query = & logman query '{{ collector_name }}' 2>&1
-              $QueryExit = $LASTEXITCODE
-              $CollectorExists = ($QueryExit -eq 0)
-
-              if ($CollectorExists) {
-                  Write-Log 'Existing baseline collector found.'
-
-                  if (($Query | Out-String) -match '(?im)^\s*Status:\s*Running') {
-                      & logman stop '{{ collector_name }}' 2>&1 |
-                          ForEach-Object { Write-Log "$_" }
-                  }
-
-                  & logman delete '{{ collector_name }}' 2>&1 |
-                      ForEach-Object { Write-Log "$_" }
-
-                  if ($LASTEXITCODE -ne 0) {
-                      throw 'Failed to delete the existing baseline collector.'
-                  }
-              }
-              else {
-                  Write-Log 'No existing baseline collector found.'
-              }
-
-              # Remove expired CSV files and log files.
-              $Cutoff = (Get-Date).AddDays(-$Age)
-
-              foreach ($Folder in @($CSVPath, $LogPath)) {
-                  $OldFiles = Get-ChildItem -LiteralPath $Folder `
-                      -File -Recurse -ErrorAction Stop |
-                      Where-Object { $_.LastWriteTime -lt $Cutoff }
-
-                  foreach ($File in $OldFiles) {
-                      Remove-Item -LiteralPath $File.FullName -Force
-                      Write-Log "Removed expired file: $($File.FullName)"
-                  }
-              }
-
-              Write-Log "Cleanup completed using $Age-day retention."
-          register: baseline_cleanup
-
-        - name: Check free space after cleanup
-          ansible.windows.win_powershell:
-            script: |
-              $ErrorActionPreference = 'Stop'
-              $Disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-              $FreeGB = [math]::Round($Disk.FreeSpace / 1GB, 2)
-              $Ansible.Result = @{ free_space_post_gb = $FreeGB }
-          register: disk_post_cleanup
-          
-        - name: Compress previous-day baseline CSV files
-          ansible.windows.win_powershell:
-            script: |
-              $ErrorActionPreference = 'Stop'
-
-              $CSVPath = '{{ csv_path }}'
-              $LogFile = '{{ log_path }}\Baseline_Ansible.log'
-              $TodayStart = (Get-Date).Date
-
-              # Find all CSV files written before today that haven't been compressed yet
-              $OldCsvFiles = Get-ChildItem -LiteralPath $CSVPath -Filter '*.csv' -File -Recurse |
-                  Where-Object { $_.LastWriteTime -lt $TodayStart }
-
-              foreach ($File in $OldCsvFiles) {
-                  $ZipFile = "$($File.FullName).zip"
-
-                  if (-not (Test-Path -LiteralPath $ZipFile)) {
-                      Compress-Archive -LiteralPath $File.FullName `
-                          -DestinationPath $ZipFile `
-                          -CompressionLevel Fastest
-
-                      if (Test-Path -LiteralPath $ZipFile) {
-                          Remove-Item -LiteralPath $File.FullName -Force
-                          Add-Content -LiteralPath $LogFile -Value (
-                              "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Compressed and archived: $($File.FullName) -> $ZipFile"
-                          )
-                      }
-                  }
-              }
-         
-        
-        - name: Enable existing scheduled task or create it from XML
+        - name: Configure collector and scheduled task
           ansible.windows.win_powershell:
             script: |
               $ErrorActionPreference = 'Stop'
               $TaskName = '{{ task_name }}'
-              $XmlPath = '{{ task_xml }}'
+              $CollectorName = '{{ collector_name }}'
+              $LogFile = '{{ log_path }}\Baseline_Ansible.log'
 
-              $Task = Get-ScheduledTask -TaskName $TaskName `
-                  -ErrorAction SilentlyContinue
-
-              if ($null -ne $Task) {
+              # Ensure Scheduled Task is registered
+              $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+              if ($null -eq $Task) {
+                  Register-ScheduledTask -TaskName $TaskName -Xml (Get-Content -LiteralPath '{{ task_xml }}' -Raw) -Force | Out-Null
+              } else {
                   if ($Task.State -eq 'Disabled') {
-                      Enable-ScheduledTask -TaskName $TaskName |
-                          Out-Null
+                      Enable-ScheduledTask -TaskName $TaskName | Out-Null
                   }
               }
-              else {
-                  Register-ScheduledTask -TaskName $TaskName `
-                      -Xml (Get-Content -LiteralPath $XmlPath -Raw) `
-                      -Force | Out-Null
+
+              # Check and start or reconfigure collector
+              $Query = & logman query $CollectorName 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                  $OutputPrefix = Join-Path '{{ csv_path }}' $env:COMPUTERNAME
+                  & logman create counter $CollectorName -o $OutputPrefix -f csv -v mmddhhmm -cf '{{ counter_file }}' -si 60 -sc 1440
+                  if ($LASTEXITCODE -ne 0) { throw "Failed to create counter collector $CollectorName" }
               }
 
-              $Task = Get-ScheduledTask -TaskName $TaskName
-              if ($Task.State -eq 'Disabled') {
-                  throw "Scheduled task '$TaskName' remains disabled."
+              if (($Query | Out-String) -notmatch '(?im)^\s*Status:\s*Running') {
+                  & logman start $CollectorName
+                  if ($LASTEXITCODE -ne 0) { throw "Failed to start counter collector $CollectorName" }
               }
 
-        - name: Create and start the baseline performance counter set
+              Add-Content -LiteralPath $LogFile -Value "$((Get-Date).ToString('yyyy/MM/dd HH:mm:ss')) - Collector and task verified active."
+
+        - name: Validate metric collection
           ansible.windows.win_powershell:
             script: |
-              $ErrorActionPreference = 'Stop'
-
-              $OutputPrefix = Join-Path '{{ csv_path }}' $env:COMPUTERNAME
-
-              & logman create counter '{{ collector_name }}' `
-                  -o $OutputPrefix `
-                  -f csv `
-                  -v mmddhhmm `
-                  -cf '{{ counter_file }}' `
-                  -si 60 `
-                  -sc 1440
-
-              if ($LASTEXITCODE -ne 0) {
-                  throw 'Failed to create the baseline counter set.'
-              }
-
-              & logman start '{{ collector_name }}'
-
-              if ($LASTEXITCODE -ne 0) {
-                  throw 'Failed to start the baseline counter set.'
-              }
-
-              Add-Content -LiteralPath '{{ log_path }}\Baseline_Ansible.log' `
-                  -Value "$(Get-Date -Format 'yyyy/MM/dd HH:mm:ss') - Baseline collector created and started."
-
-        - name: Validate baseline collector and scheduled task
-          ansible.windows.win_powershell:
-            script: |
-              $ErrorActionPreference = 'Stop'
-
-              $Collector = & logman query '{{ collector_name }}' 2>&1
-              if ($LASTEXITCODE -ne 0) {
-                  throw 'Baseline collector validation failed.'
-              }
-
-              $Task = Get-ScheduledTask -TaskName '{{ task_name }}'
-              if ($Task.State -eq 'Disabled') {
-                  throw 'Baseline scheduled task is disabled.'
-              }
-
-              $Ansible.Result = @{
-                  collector = ($Collector | Out-String).Trim()
-                  task_state = [string]$Task.State
-              }
-          register: baseline_validation
-
-        - name: Wait for collector to write initial sample
-          ansible.builtin.pause:
-            seconds: 30
-
-        - name: Parse latest single baseline performance metric
-          ansible.windows.win_powershell:
-            script: |
-              $ErrorActionPreference = 'Stop'
-
-              function To-Double ($val, $decimals = 2) {
-                  $clean = "$val".Trim()
-                  $out = 0.0
-                  if ([double]::TryParse($clean, [ref]$out)) {
-                      return [math]::Round($out, $decimals)
-                  }
-                  return 0.0
-              }
-
               $LatestFile = Get-ChildItem -LiteralPath '{{ csv_path }}' -Filter '*.csv' -File |
                   Sort-Object LastWriteTime -Descending |
                   Select-Object -First 1
 
               if ($null -eq $LatestFile) {
-                  throw "No baseline CSV file found in {{ csv_path }}"
-              }
-
-              $Data = @(Import-Csv -LiteralPath $LatestFile.FullName)
-              if ($Data.Count -eq 0) {
-                  $Ansible.Result = @{ status = "empty" }
+                  $Ansible.Result = @{ status = "pending" }
                   return
               }
 
-              # Dynamically find the disk free % column or fall back to index 4 if matching the original counter order
-              $Cols = $Data[0].PSObject.Properties.Name
-              $DiskCol = $Cols | Where-Object { $_ -match '% Free Space' } | Select-Object -First 1
-              if (-not $DiskCol) {
-                  $DiskCol = if ($Cols.Count -gt 4) { $Cols[4] } else { $Cols[-1] }
+              # Safely read shared file
+              $Stream = [System.IO.File]::Open($LatestFile.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+              $Reader = New-Object System.IO.StreamReader($Stream)
+              $Content = $Reader.ReadToEnd()
+              $Reader.Close()
+              $Stream.Close()
+
+              $Data = @($Content | ConvertFrom-Csv)
+              if ($Data.Count -gt 0) {
+                  $LatestRow = $Data[-1]
+                  $Cols = $Data[0].PSObject.Properties.Name
+                  $DiskCol = $Cols | Where-Object { $_ -match '% Free Space' } | Select-Object -First 1
+                  if (-not $DiskCol) { $DiskCol = $Cols[-1] }
+
+                  $Ansible.Result = @{
+                      status        = "ok"
+                      source_file   = $LatestFile.Name
+                      timestamp     = [string]$LatestRow.$($Cols[0])
+                      disk_free_pct = $LatestRow.$DiskCol
+                  }
+              } else {
+                  $Ansible.Result = @{ status = "sampling" }
               }
+          register: metric_status
 
-              $LatestRow = $Data | Select-Object -Last 1
-
-              $Ansible.Result = @{
-                  source_file   = $LatestFile.Name
-                  timestamp     = [string]$LatestRow.$($Cols[0])
-                  disk_free_pct = To-Double $LatestRow.$DiskCol 1
-              }
-          register: baseline_summary
-
-        - name: Display formatted baseline performance metrics
+        - name: Display summary report
           ansible.builtin.debug:
             msg:
-              - "================ LATEST BASELINE METRIC ================"
-              - "Log File      : {{ baseline_summary.result.source_file }}"
-              - "Collector     : Active (Running)"
-              - "Task Status   : {{ baseline_validation.result.task_state }}"
-              - "Timestamp     : {{ baseline_summary.result.timestamp }}"
-              - "---------------- DISK SPACE SUMMARY --------------------"
-              - "Initial Free  : {{ baseline_space.result.free_space_gb }} GB"
-              - "Post-Cleanup  : {{ disk_post_cleanup.result.free_space_post_gb }} GB"
-              - "Space Freed   : {{ (disk_post_cleanup.result.free_space_post_gb | float - baseline_space.result.free_space_gb | float) | round(2) }} GB"
-              - "C: Free Pct   : {{ baseline_summary.result.disk_free_pct }} %"
-              - "========================================================"
-
-    - name: Report low disk space outcome
-      ansible.builtin.debug:
-        msg: >-
-          Baseline setup skipped because C: has less than 1 GB free.
-          Review the Windows VM disk space before retrying.
-      when: baseline_space.result.skip_setup | bool
+              - "================ BASELINE SUMMARY REPORT ================"
+              - "Initial Free Space : {{ maintenance_result.result.initial_free_gb }} GB"
+              - "Post-Cleanup Free  : {{ maintenance_result.result.post_free_gb }} GB"
+              - "Retention Days     : {{ maintenance_result.result.retention_days }}"
+              - "Sampling Status    : {{ metric_status.result.status }}"
+              - "Target File        : {{ metric_status.result.source_file | default('N/A') }}"
+              - "Latest Free %      : {{ metric_status.result.disk_free_pct | default('N/A') }}"
+              - "=========================================================="
