@@ -1,8 +1,5 @@
 # =============================================================================
 # Playbook Name : uninstall-fluentbit.yaml
-# Description   : Automates the uninstallation of the Fluent Bit agent from
-#                 Windows servers, including environment variable removal
-#                 and cleanup of Fluent Bit installation and source directories.
 #
 # Purpose       : Remove the Fluent Bit agent and its associated files and
 #                 environment variables from Windows servers during
