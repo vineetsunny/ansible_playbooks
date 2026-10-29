@@ -51,7 +51,7 @@
 
 ---
 - name: Uninstall Fluent Bit agent from Windows servers
-  hosts: windows
+  hosts: test-vm
   gather_facts: false
 
   tasks:
