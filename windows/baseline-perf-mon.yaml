@@ -40,7 +40,7 @@
 # =============================================================================
 ---
 - name: Configure Windows Baseline Performance Monitoring
-  hosts: win-test19
+  hosts: test-vm
   gather_facts: false
 
   vars:
