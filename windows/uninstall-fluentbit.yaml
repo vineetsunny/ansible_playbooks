@@ -344,20 +344,20 @@
   ansible.builtin.debug:
     msg: "========== FLUENT BIT UNINSTALL SUMMARY =========="
 
-- name: Display remediation status
-  ansible.builtin.debug:
-    msg:
-      - "Exit Code          : {{ fluentbit_uninstall_result.result.ExitCode }}"
-      - "Successful Actions : {{ fluentbit_uninstall_result.result.SuccessCount }}"
-      - "Failed Actions     : {{ fluentbit_uninstall_result.result.FailureCount }}"
-      - "Actions Attempted  : {{ fluentbit_uninstall_result.result.ActionsAttempted }}"
+  - name: Display remediation status
+    ansible.builtin.debug:
+      msg:
+        - "Exit Code          : {{ fluentbit_uninstall_result.result.ExitCode }}"
+        - "Successful Actions : {{ fluentbit_uninstall_result.result.SuccessCount }}"
+        - "Failed Actions     : {{ fluentbit_uninstall_result.result.FailureCount }}"
+        - "Actions Attempted  : {{ fluentbit_uninstall_result.result.ActionsAttempted }}"
 
-- name: Display individual remediation details
-  ansible.builtin.debug:
-    msg: "{{ item }}"
-  loop: "{{ fluentbit_uninstall_result.result.Messages }}"
+  - name: Display individual remediation details
+    ansible.builtin.debug:
+      msg: "{{ item }}"
+    loop: "{{ fluentbit_uninstall_result.result.Messages }}"
 
-- name: Display summary footer
-  ansible.builtin.debug:
-    msg: "=================================================="
+  - name: Display summary footer
+    ansible.builtin.debug:
+      msg: "=================================================="
     
