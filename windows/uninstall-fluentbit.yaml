@@ -11,7 +11,7 @@
 # Config Path   : C:\Program Files\td-agent-bit\conf\company
 # Config Pattern: upstream*.conf
 # Source Path   : C:\Windows\Build\Scripts\Fluent*
-# Server Names  : Vmserver1, Vmserver2 (Change Servers' name in playbook)
+# Server Names  : Vmserver1, Vmserver2 (Change target Servers' name in playbook)
 #
 # Environment Variables:
 #   - PUPPET-FLUENTBIT1.8.11-PAYLOAD
