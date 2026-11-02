@@ -43,7 +43,7 @@
 #                 3  - All attempted remediation actions failed
 #                 20 - Unexpected execution error
 #
-# Version       : 1.1
+# Version       : 1.0
 # =============================================================================
 
 ---
@@ -332,9 +332,9 @@
 
       register: fluentbit_uninstall_result
 
-    - name: Display Fluent Bit remediation summary
-      ansible.builtin.debug:
-        msg: "========== FLUENT BIT UNINSTALL SUMMARY =========="
+    #- name: Display Fluent Bit remediation summary
+      #ansible.builtin.debug:
+        #msg: "========== FLUENT BIT UNINSTALL SUMMARY =========="
 
     - name: Display remediation status
       ansible.builtin.debug:
@@ -349,6 +349,6 @@
         msg: "{{ item }}"
       loop: "{{ fluentbit_uninstall_result.result.Messages }}"
 
-    - name: Display summary footer
-      ansible.builtin.debug:
-        msg: "=================================================="
+    #- name: Display summary footer
+    #ansible.builtin.debug:
+    #msg: "=================================================="
