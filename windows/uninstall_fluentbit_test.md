@@ -1,4 +1,4 @@
-# Fluent Bit Software Uninstallation Test Prerequisites & Cases:
+# Fluent Bit Software Uninstallation -  Test Prerequisites & Cases
 
 ***1. Install Fluent Bit***
 - Install Fluent Bit under:  `C:\Program Files\td-agent-bit`
