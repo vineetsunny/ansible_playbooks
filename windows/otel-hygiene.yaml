@@ -18,9 +18,8 @@
 
   tasks:
 
-    # ---------------------------------------------------------
+
     # Initialize remediation counters
-    # ---------------------------------------------------------
 
     - name: Initialize remediation counters
       ansible.builtin.set_fact:
@@ -29,9 +28,7 @@
         config_changed: false
         exit_code: 0
 
-    # ---------------------------------------------------------
     # Check Otel service
-    # ---------------------------------------------------------
 
     - name: Check whether Otel service exists
       ansible.windows.win_service_info:
@@ -42,9 +39,7 @@
       ansible.builtin.debug:
         msg: "Otel service exists: {{ otel_service_info.services | length > 0 }}"
 
-    # ---------------------------------------------------------
     # Stop remediation if service does not exist
-    # ---------------------------------------------------------
 
     - name: Set skip remediation flag
       ansible.builtin.set_fact:
@@ -90,9 +85,7 @@
           (otel_version_check.result.version | default('')) == otel_expected_version
           or otel_service_info.services[0].start_mode == 'disabled'
 
-    # ---------------------------------------------------------
     # Check whether remediation is required
-    # ---------------------------------------------------------
 
     - name: Check Otel log file size
       ansible.windows.win_powershell:
@@ -142,10 +135,8 @@
       register: otel_config_info
       when: not (skip_remediation | default(false))
 
-    # ---------------------------------------------------------
     # Clean up old log entries
     # Retain latest 500 lines if file exceeds 5 MB
-    # ---------------------------------------------------------
 
     - name: Clean up Otel log file
       block:
@@ -215,9 +206,7 @@
         - otel_log_info.result.exists | default(false)
         - otel_log_info.result.size | int > otel_max_log_size
 
-    # ---------------------------------------------------------
     # Update memory limit
-    # ---------------------------------------------------------
 
     - name: Update Otel memory limit
       block:
@@ -267,9 +256,7 @@
         - not (skip_remediation | default(false))
         - otel_config_info.result.memory_limit | default('') != (otel_memory_limit | string)
 
-    # ---------------------------------------------------------
     # Update spike limit
-    # ---------------------------------------------------------
 
     - name: Update Otel spike limit
       block:
@@ -319,9 +306,7 @@
         - not (skip_remediation | default(false))
         - otel_config_info.result.spike_limit | default('') != (otel_spike_limit | string)
 
-    # ---------------------------------------------------------
     # Restart service after configuration changes
-    # ---------------------------------------------------------
 
     - name: Restart Otel service after configuration changes
       block:
@@ -357,9 +342,7 @@
         - not (skip_remediation | default(false))
         - config_changed | bool
 
-    # ---------------------------------------------------------
     # Set service startup type to Automatic Delayed Start
-    # ---------------------------------------------------------
 
     - name: Configure Otel service startup type
       block:
@@ -395,9 +378,7 @@
         - not (skip_remediation | default(false))
         - otel_service_info.services[0].start_mode != 'delayed'
 
-    # ---------------------------------------------------------
     # Start Otel service if not running
-    # ---------------------------------------------------------
 
     - name: Start Otel service if stopped
       block:
@@ -433,9 +414,7 @@
         - not (skip_remediation | default(false))
         - otel_service_info.services[0].state != 'started'
 
-    # ---------------------------------------------------------
     # Calculate final exit code
-    # ---------------------------------------------------------
 
     - name: Determine final remediation exit code
       ansible.builtin.set_fact:
@@ -452,9 +431,7 @@
           0
           {% endif %}
 
-    # ---------------------------------------------------------
     # Display remediation summary
-    # ---------------------------------------------------------
 
     - name: Display Otel remediation summary
       ansible.builtin.debug:
@@ -463,9 +440,7 @@
           - "Remediation failed actions: {{ remediation_failure }}"
           - "Final Exit Code: {{ exit_code | trim }}"
 
-    # ---------------------------------------------------------
     # Publish exit code for AAP
-    # ---------------------------------------------------------
 
     - name: Publish remediation exit code
       ansible.builtin.set_stats:
