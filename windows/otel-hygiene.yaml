@@ -1,0 +1,475 @@
+---
+- name: OpenTelemetry Agent Remediation
+  hosts: test-vm
+  gather_facts: false
+
+  vars:
+    otel_service_name: "Otel"
+    otel_expected_version: "0.96.0.0"
+
+    otel_log_file: 'C:\Windows\CWS Build\Logs\otel-debug.log'
+    otel_max_log_size: 5242880
+    otel_keep_log_lines: 500
+
+    otel_config_file: 'C:\Program Files\Otel-Collector\conf\otel-config.yaml'
+
+    otel_memory_limit: 650
+    otel_spike_limit: 130
+
+  tasks:
+
+    # ---------------------------------------------------------
+    # Initialize remediation counters
+    # ---------------------------------------------------------
+
+    - name: Initialize remediation counters
+      ansible.builtin.set_fact:
+        remediation_success: 0
+        remediation_failure: 0
+        config_changed: false
+        exit_code: 0
+
+    # ---------------------------------------------------------
+    # Check Otel service
+    # ---------------------------------------------------------
+
+    - name: Check whether Otel service exists
+      ansible.windows.win_service_info:
+        name: "{{ otel_service_name }}"
+      register: otel_service_info
+
+    - name: Display Otel service information
+      ansible.builtin.debug:
+        msg: "Otel service exists: {{ otel_service_info.services | length > 0 }}"
+
+    # ---------------------------------------------------------
+    # Stop remediation if service does not exist
+    # ---------------------------------------------------------
+
+    - name: Set skip remediation flag
+      ansible.builtin.set_fact:
+        skip_remediation: true
+      when: otel_service_info.services | length == 0
+
+    - name: Check installed Otel Collector version
+      ansible.windows.win_powershell:
+        script: |
+          $version = $null
+
+          $uninstallPaths = @(
+              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+          )
+
+          foreach ($path in $uninstallPaths) {
+              $app = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+                  Where-Object {
+                      $_.DisplayName -like '*Otelcollector*'
+                  } |
+                  Select-Object -First 1
+
+              if ($app) {
+                  $version = $app.DisplayVersion
+                  break
+              }
+          }
+
+          $Ansible.Result = @{
+              version = $version
+          }
+      register: otel_version_check
+      when:
+        - not (skip_remediation | default(false))
+
+    - name: Skip remediation for matching version or disabled service
+      ansible.builtin.set_fact:
+        skip_remediation: true
+      when:
+        - not (skip_remediation | default(false))
+        - >
+          (otel_version_check.result.version | default('')) == otel_expected_version
+          or otel_service_info.services[0].start_mode == 'disabled'
+
+    # ---------------------------------------------------------
+    # Check whether remediation is required
+    # ---------------------------------------------------------
+
+    - name: Check Otel log file size
+      ansible.windows.win_powershell:
+        script: |
+          $file = Get-Item -LiteralPath "{{ otel_log_file }}" -ErrorAction SilentlyContinue
+
+          if ($file) {
+              $Ansible.Result = @{
+                  exists = $true
+                  size = $file.Length
+              }
+          }
+          else {
+              $Ansible.Result = @{
+                  exists = $false
+                  size = 0
+              }
+          }
+      register: otel_log_info
+      when: not (skip_remediation | default(false))
+
+    - name: Read current Otel configuration
+      ansible.windows.win_powershell:
+        script: |
+          $path = "{{ otel_config_file }}"
+
+          if (-not (Test-Path -LiteralPath $path)) {
+              throw "Otel configuration file does not exist: $path"
+          }
+
+          $content = Get-Content -LiteralPath $path -Raw
+
+          $memory = [regex]::Match(
+              $content,
+              '(?m)^\s*limit_mib\s*:\s*(\d+)'
+          )
+
+          $spike = [regex]::Match(
+              $content,
+              '(?m)^\s*spike_limit_mib\s*:\s*(\d+)'
+          )
+
+          $Ansible.Result = @{
+              memory_limit = if ($memory.Success) { $memory.Groups[1].Value } else { $null }
+              spike_limit = if ($spike.Success) { $spike.Groups[1].Value } else { $null }
+          }
+      register: otel_config_info
+      when: not (skip_remediation | default(false))
+
+    # ---------------------------------------------------------
+    # Clean up old log entries
+    # Retain latest 500 lines if file exceeds 5 MB
+    # ---------------------------------------------------------
+
+    - name: Clean up Otel log file
+      block:
+
+        - name: Retain latest 500 log entries
+          ansible.windows.win_powershell:
+            script: |
+              $path = "{{ otel_log_file }}"
+              $maxSize = {{ otel_max_log_size }}
+
+              if (Test-Path -LiteralPath $path) {
+
+                  $file = Get-Item -LiteralPath $path
+
+                  if ($file.Length -gt $maxSize) {
+
+                      $content = Get-Content -LiteralPath $path -ErrorAction Stop |
+                          Select-Object -Last {{ otel_keep_log_lines }}
+
+                      Set-Content -LiteralPath $path -Value $content -ErrorAction Stop
+
+                      $newFile = Get-Item -LiteralPath $path
+
+                      $Ansible.Result = @{
+                          success = ($newFile.Length -le $maxSize)
+                          size = $newFile.Length
+                      }
+                  }
+                  else {
+                      $Ansible.Result = @{
+                          success = $true
+                          skipped = $true
+                      }
+                  }
+              }
+              else {
+                  $Ansible.Result = @{
+                      success = $true
+                      skipped = $true
+                  }
+              }
+          register: log_cleanup_result
+          changed_when: >
+            log_cleanup_result.result.success
+            and not (log_cleanup_result.result.skipped | default(false))
+
+        - name: Count log cleanup success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+          when:
+            - log_cleanup_result.result.success | default(false)
+            - not (log_cleanup_result.result.skipped | default(false))
+
+        - name: Count log cleanup failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: not (log_cleanup_result.result.success | default(false))
+
+      rescue:
+
+        - name: Record log cleanup failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - otel_log_info.result.exists | default(false)
+        - otel_log_info.result.size | int > otel_max_log_size
+
+    # ---------------------------------------------------------
+    # Update memory limit
+    # ---------------------------------------------------------
+
+    - name: Update Otel memory limit
+      block:
+
+        - name: Configure memory limit to 650 MiB
+          ansible.windows.win_lineinfile:
+            path: "{{ otel_config_file }}"
+            regex: '^\s*limit_mib\s*:'
+            line: "    limit_mib: {{ otel_memory_limit }}"
+            backup: true
+          register: memory_update_result
+
+        - name: Validate memory limit
+          ansible.windows.win_powershell:
+            script: |
+              $content = Get-Content -LiteralPath "{{ otel_config_file }}" -Raw
+
+              $match = [regex]::Match(
+                  $content,
+                  '(?m)^\s*limit_mib\s*:\s*(\d+)'
+              )
+
+              $Ansible.Result = @{
+                  success = $match.Success -and
+                            $match.Groups[1].Value -eq "{{ otel_memory_limit }}"
+              }
+          register: memory_validation
+
+        - name: Count memory update success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+            config_changed: "{{ config_changed or memory_update_result.changed }}"
+          when: memory_validation.result.success | default(false)
+
+        - name: Count memory update failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: not (memory_validation.result.success | default(false))
+
+      rescue:
+
+        - name: Record memory update failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - otel_config_info.result.memory_limit | default('') != (otel_memory_limit | string)
+
+    # ---------------------------------------------------------
+    # Update spike limit
+    # ---------------------------------------------------------
+
+    - name: Update Otel spike limit
+      block:
+
+        - name: Configure spike limit to 130 MiB
+          ansible.windows.win_lineinfile:
+            path: "{{ otel_config_file }}"
+            regex: '^\s*spike_limit_mib\s*:'
+            line: "    spike_limit_mib: {{ otel_spike_limit }}"
+            backup: true
+          register: spike_update_result
+
+        - name: Validate spike limit
+          ansible.windows.win_powershell:
+            script: |
+              $content = Get-Content -LiteralPath "{{ otel_config_file }}" -Raw
+
+              $match = [regex]::Match(
+                  $content,
+                  '(?m)^\s*spike_limit_mib\s*:\s*(\d+)'
+              )
+
+              $Ansible.Result = @{
+                  success = $match.Success -and
+                            $match.Groups[1].Value -eq "{{ otel_spike_limit }}"
+              }
+          register: spike_validation
+
+        - name: Count spike update success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+            config_changed: "{{ config_changed or spike_update_result.changed }}"
+          when: spike_validation.result.success | default(false)
+
+        - name: Count spike update failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: not (spike_validation.result.success | default(false))
+
+      rescue:
+
+        - name: Record spike update failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - otel_config_info.result.spike_limit | default('') != (otel_spike_limit | string)
+
+    # ---------------------------------------------------------
+    # Restart service after configuration changes
+    # ---------------------------------------------------------
+
+    - name: Restart Otel service after configuration changes
+      block:
+
+        - name: Restart Otel service
+          ansible.windows.win_service:
+            name: "{{ otel_service_name }}"
+            state: restarted
+          register: otel_restart_result
+
+        - name: Verify Otel service is running
+          ansible.windows.win_service_info:
+            name: "{{ otel_service_name }}"
+          register: otel_restart_validation
+
+        - name: Count service restart success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+          when: otel_restart_validation.services[0].state == 'started'
+
+        - name: Count service restart failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: otel_restart_validation.services[0].state != 'started'
+
+      rescue:
+
+        - name: Record service restart failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - config_changed | bool
+
+    # ---------------------------------------------------------
+    # Set service startup type to Automatic Delayed Start
+    # ---------------------------------------------------------
+
+    - name: Configure Otel service startup type
+      block:
+
+        - name: Set Otel service to Automatic Delayed Start
+          ansible.windows.win_service:
+            name: "{{ otel_service_name }}"
+            start_mode: delayed
+          register: startup_update_result
+
+        - name: Verify Otel startup type
+          ansible.windows.win_service_info:
+            name: "{{ otel_service_name }}"
+          register: startup_validation
+
+        - name: Count startup configuration success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+          when: startup_validation.services[0].start_mode == 'delayed'
+
+        - name: Count startup configuration failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: startup_validation.services[0].start_mode != 'delayed'
+
+      rescue:
+
+        - name: Record startup configuration failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - otel_service_info.services[0].start_mode != 'delayed'
+
+    # ---------------------------------------------------------
+    # Start Otel service if not running
+    # ---------------------------------------------------------
+
+    - name: Start Otel service if stopped
+      block:
+
+        - name: Ensure Otel service is running
+          ansible.windows.win_service:
+            name: "{{ otel_service_name }}"
+            state: started
+          register: service_start_result
+
+        - name: Verify Otel service status
+          ansible.windows.win_service_info:
+            name: "{{ otel_service_name }}"
+          register: service_start_validation
+
+        - name: Count service start success
+          ansible.builtin.set_fact:
+            remediation_success: "{{ remediation_success | int + 1 }}"
+          when: service_start_validation.services[0].state == 'started'
+
+        - name: Count service start failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+          when: service_start_validation.services[0].state != 'started'
+
+      rescue:
+
+        - name: Record service start failure
+          ansible.builtin.set_fact:
+            remediation_failure: "{{ remediation_failure | int + 1 }}"
+
+      when:
+        - not (skip_remediation | default(false))
+        - otel_service_info.services[0].state != 'started'
+
+    # ---------------------------------------------------------
+    # Calculate final exit code
+    # ---------------------------------------------------------
+
+    - name: Determine final remediation exit code
+      ansible.builtin.set_fact:
+        exit_code: >-
+          {% if skip_remediation | default(false) %}
+          0
+          {% elif remediation_success | int > 0 and remediation_failure | int == 0 %}
+          1
+          {% elif remediation_success | int > 0 and remediation_failure | int > 0 %}
+          2
+          {% elif remediation_success | int == 0 and remediation_failure | int > 0 %}
+          3
+          {% else %}
+          0
+          {% endif %}
+
+    # ---------------------------------------------------------
+    # Display remediation summary
+    # ---------------------------------------------------------
+
+    - name: Display Otel remediation summary
+      ansible.builtin.debug:
+        msg:
+          - "Remediation successful actions: {{ remediation_success }}"
+          - "Remediation failed actions: {{ remediation_failure }}"
+          - "Final Exit Code: {{ exit_code | trim }}"
+
+    # ---------------------------------------------------------
+    # Publish exit code for AAP
+    # ---------------------------------------------------------
+
+    - name: Publish remediation exit code
+      ansible.builtin.set_stats:
+        data:
+          otel_remediation_exit_code: "{{ exit_code | trim | int }}"
+          otel_remediation_success: "{{ remediation_success | int }}"
+          otel_remediation_failure: "{{ remediation_failure | int }}"
