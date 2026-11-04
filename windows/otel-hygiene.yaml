@@ -56,53 +56,81 @@
     - name: Check installed Otel Collector version
       ansible.windows.win_powershell:
         script: |
-          $version = $null
-          $foundSource = $null
+          $version = ""
+          $foundSource = "None"
 
-          # 1. Check registry uninstall paths
-          $uninstallPaths = @(
-              'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-          )
+          # 1. Locate binary from the Otel Windows Service definition
+          $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name = '{{ otel_service_name }}'" -ErrorAction SilentlyContinue
+          $exePath = $null
 
-          foreach ($path in $uninstallPaths) {
-              $app = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-                  Where-Object { $_.DisplayName -match 'otel|opentelemetry' } |
-                  Select-Object -First 1
-
-              if ($app -and $app.DisplayVersion) {
-                  $version = $app.DisplayVersion.Trim()
-                  $foundSource = "Registry: $($app.DisplayName)"
-                  break
+          if ($svc -and $svc.PathName) {
+              $rawPath = $svc.PathName.Trim()
+              if ($rawPath.StartsWith('"')) {
+                  $exePath = $rawPath.Split('"')[1]
+              } else {
+                  $exePath = $rawPath.Split(' ')[0]
               }
           }
 
-          # 2. Fallback: Query the Windows Service directly for its binary path and read file version
-          if (-not $version) {
-              $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name = '{{ otel_service_name }}'" -ErrorAction SilentlyContinue
-              if ($svc -and $svc.PathName) {
-                  # Extract clean executable path (removing quotes and CLI flags)
-                  $rawPath = $svc.PathName.Trim()
-                  if ($rawPath.StartsWith('"')) {
-                      $exePath = $rawPath.Split('"')[1]
-                  } else {
-                      $exePath = $rawPath.Split(' ')[0]
+          # Fallback path if service query failed
+          if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) {
+              $defaultPaths = @(
+                  'C:\Program Files\Otel-Collector\otelcol.exe',
+                  'C:\Program Files\OpenTelemetry Collector\otelcol.exe',
+                  'C:\Program Files\otelcol\otelcol.exe'
+              )
+              foreach ($p in $defaultPaths) {
+                  if (Test-Path -LiteralPath $p) {
+                      $exePath = $p
+                      break
                   }
+              }
+          }
 
-                  if (Test-Path -LiteralPath $exePath) {
-                      $fileInfo = (Get-Item -LiteralPath $exePath).VersionInfo
-                      $version = ($fileInfo.ProductVersion, $fileInfo.FileVersion | Where-Object { $_ } | Select-Object -First 1)
-                      if ($version) {
-                          $version = $version.Trim()
-                          $foundSource = "Binary Path: $exePath"
-                      }
+          # 2. Extract version by running CLI flag (Standard for Go / Otel binaries)
+          if ($exePath -and (Test-Path -LiteralPath $exePath)) {
+              try {
+                  $cliOutput = & "$exePath" --version 2>&1 | Out-String
+                  if ($cliOutput -match '(\d+\.\d+\.\d+(\.\d+)?)') {
+                      $version = $Matches[1]
+                      $foundSource = "CLI (--version): $exePath"
+                  }
+              } catch {
+                  # In case execution fails, continue to next method
+              }
+
+              # 3. Check File VersionInfo if CLI didn't yield a result
+              if ([string]::IsNullOrWhiteSpace($version)) {
+                  $fInfo = (Get-Item -LiteralPath $exePath).VersionInfo
+                  $v = ($fInfo.ProductVersion, $fInfo.FileVersion | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+                  if ($v) {
+                      $version = $v.Trim()
+                      $foundSource = "PE Header: $exePath"
+                  }
+              }
+          }
+
+          # 4. Fallback to Registry if still empty
+          if ([string]::IsNullOrWhiteSpace($version)) {
+              $uninstallPaths = @(
+                  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+              )
+              foreach ($path in $uninstallPaths) {
+                  $app = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
+                      Where-Object { $_.DisplayName -match 'otel|opentelemetry' } |
+                      Select-Object -First 1
+                  if ($app -and $app.DisplayVersion) {
+                      $version = ($app.DisplayVersion | Out-String).Trim()
+                      $foundSource = "Registry: $($app.DisplayName)"
+                      break
                   }
               }
           }
 
           $Ansible.Result = @{
-              version      = $version
-              found_source = $foundSource
+              version      = [string]$version
+              found_source = [string]$foundSource
           }
       register: otel_version_check
       when: not (skip_remediation | default(false) | bool)
