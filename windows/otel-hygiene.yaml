@@ -57,7 +57,9 @@
       ansible.windows.win_powershell:
         script: |
           $version = $null
+          $foundSource = $null
 
+          # 1. Check registry uninstall paths
           $uninstallPaths = @(
               'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
               'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
@@ -65,23 +67,45 @@
 
           foreach ($path in $uninstallPaths) {
               $app = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue |
-                  Where-Object {
-                      $_.DisplayName -like '*Otelcollector*'
-                  } |
+                  Where-Object { $_.DisplayName -match 'otel|opentelemetry' } |
                   Select-Object -First 1
 
-              if ($app) {
-                  $version = $app.DisplayVersion
+              if ($app -and $app.DisplayVersion) {
+                  $version = $app.DisplayVersion.Trim()
+                  $foundSource = "Registry: $($app.DisplayName)"
                   break
               }
           }
 
+          # 2. Fallback: Query the Windows Service directly for its binary path and read file version
+          if (-not $version) {
+              $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name = '{{ otel_service_name }}'" -ErrorAction SilentlyContinue
+              if ($svc -and $svc.PathName) {
+                  # Extract clean executable path (removing quotes and CLI flags)
+                  $rawPath = $svc.PathName.Trim()
+                  if ($rawPath.StartsWith('"')) {
+                      $exePath = $rawPath.Split('"')[1]
+                  } else {
+                      $exePath = $rawPath.Split(' ')[0]
+                  }
+
+                  if (Test-Path -LiteralPath $exePath) {
+                      $fileInfo = (Get-Item -LiteralPath $exePath).VersionInfo
+                      $version = ($fileInfo.ProductVersion, $fileInfo.FileVersion | Where-Object { $_ } | Select-Object -First 1)
+                      if ($version) {
+                          $version = $version.Trim()
+                          $foundSource = "Binary Path: $exePath"
+                      }
+                  }
+              }
+          }
+
           $Ansible.Result = @{
-              version = $version
+              version      = $version
+              found_source = $foundSource
           }
       register: otel_version_check
-      when:
-        - not (skip_remediation | default(false))
+      when: not (skip_remediation | default(false) | bool)
         
     - name: Display detected Otel version and check details
       ansible.builtin.debug:
@@ -97,10 +121,11 @@
       ansible.builtin.set_fact:
         skip_remediation: true
       when:
-        - not (skip_remediation | default(false))
-        - >
-          (otel_version_check.result.version | default('')) == otel_expected_version
-          or otel_service_info.services[0].start_mode == 'disabled'
+        - not (skip_remediation | default(false) | bool)
+        - >-
+          (otel_expected_version in (otel_version_check.result.version | default('')))
+          or (otel_version_check.result.version | default('') in otel_expected_version)
+          or (otel_service_info.services[0].start_mode | default('') == 'disabled')
 
     - name: Record version or disabled-service skip reason
       ansible.builtin.set_fact:
