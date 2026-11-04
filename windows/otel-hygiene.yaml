@@ -1,3 +1,69 @@
+# =============================================================================
+# Playbook Name : otel-hygiene.yml
+#
+# Purpose       : Monitor and remediate the OpenTelemetry Collector service
+#                 on Windows servers by cleaning excessive log files,
+#                 updating memory and spike limits, and ensuring the
+#                 service is running with Automatic Delayed Start.
+#
+# Scope         : Windows servers / VMs
+# Application   : OpenTelemetry Collector
+# Service Name  : Otel
+# Expected Version: 0.96.0.0
+#
+# Log File Path : C:\Windows\CWS Build\Logs\otel-debug.log
+# Maximum Log Size : 5 MB
+# Log Retention : Latest 500 lines
+#
+# Install Path  : C:\Program Files\Otel-Collector
+# Config Path   : C:\Program Files\Otel-Collector\conf\otel-config.yaml
+#
+# Configuration:
+#   - Memory Limit    : 650 MiB
+#   - Spike Limit     : 130 MiB
+#   - Startup Type    : Automatic Delayed Start
+#   - Service State   : Running
+#
+# Prerequisites:
+#   - Ansible connectivity to the target Windows servers through WinRM.
+#   - Appropriate Windows administrator privileges.
+#   - The ansible.windows collection installed on the Ansible control node.
+#   - OpenTelemetry Collector installed and registered as a Windows service.
+#   - Service name must match the configured value in the playbook.
+#   - Access to the OpenTelemetry installation, configuration and log paths.
+#   - Configuration file must exist and contain the expected memory and
+#     spike limit settings.
+#
+# Execution     : ansible-playbook -i inventory.ini otel-agent-remediation.yml
+#
+# Important     : The playbook checks the installed OpenTelemetry Collector
+#                 version and service startup mode before proceeding.
+#
+#                 If the installed version matches the expected version
+#                 (0.96.0.0), or the service startup mode is Disabled,
+#                 remediation is skipped.
+#
+#                 When remediation is allowed, the playbook:
+#                   - Cleans the log file if its size exceeds 5 MB.
+#                   - Retains the latest 500 log entries.
+#                   - Updates memory limit to 650 MiB when required.
+#                   - Updates spike limit to 130 MiB when required.
+#                   - Restarts the service when configuration changes.
+#                   - Configures Automatic Delayed Start when required.
+#                   - Starts the service if it is not running.
+#
+#                 The playbook does not install or upgrade OpenTelemetry
+#                 Collector. Validate the version-check and skip conditions
+#                 before production execution.
+#
+# Exit Codes    : 0  - No remediation required or remediation skipped
+#                 1  - All attempted remediation actions succeeded
+#                 2  - Partial success
+#                 3  - All attempted remediation actions failed
+#
+# Version       : 1.0
+# =============================================================================
+
 ---
 - name: OpenTelemetry Agent Remediation
   hosts: test-vm
