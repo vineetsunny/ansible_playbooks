@@ -82,7 +82,17 @@
       register: otel_version_check
       when:
         - not (skip_remediation | default(false))
-
+        
+    - name: Display detected Otel version and check details
+      ansible.builtin.debug:
+        msg:
+          - "--- OTEL VERSION INSPECTION ---"
+          - "Raw Detected Version: '{{ otel_version_check.result.version | default('NOT FOUND / EMPTY') }}'"
+          - "Expected Version:     '{{ otel_expected_version }}'"
+          - "Does it match?:        {{ (otel_version_check.result.version | default('')) == otel_expected_version }}"
+          - "Service Start Mode:    '{{ otel_service_info.services[0].start_mode | default('UNKNOWN') }}'"
+          - "--------------------------------"
+          
     - name: Skip remediation for matching version or disabled service
       ansible.builtin.set_fact:
         skip_remediation: true
