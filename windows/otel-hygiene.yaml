@@ -72,7 +72,6 @@
   vars:
     otel_service_name: "Otel"
     otel_expected_version: "0.96.0.0"
-    #otel_expected_version: "0.164.0.0"
     otel_log_file: 'C:\Windows\CWS Build\Logs\otel-debug.log'
     otel_max_log_size: 5242880
     otel_keep_log_lines: 500
@@ -84,7 +83,6 @@
 
   tasks:
 
-
     # Initialize remediation counters
 
     - name: Initialize remediation counters
@@ -95,6 +93,7 @@
         exit_code: 0
         remediation_actions: []
         skip_reason: ""
+        skip_remediation: false
 
     # Check Otel service
 
@@ -200,7 +199,7 @@
           }
       register: otel_version_check
       when: not (skip_remediation | default(false) | bool)
-        
+
     - name: Display detected Otel version and check details
       ansible.builtin.debug:
         msg:
@@ -210,7 +209,8 @@
           - "Does it match?:        {{ (otel_version_check.result.version | default('')) == otel_expected_version }}"
           - "Service Start Mode:    '{{ otel_service_info.services[0].start_mode | default('UNKNOWN') }}'"
           - "--------------------------------"
-          
+      when: not (skip_remediation | default(false) | bool)
+
     - name: Skip remediation for matching version or disabled service
       ansible.builtin.set_fact:
         skip_remediation: true
@@ -225,22 +225,20 @@
       ansible.builtin.set_fact:
         skip_reason: >-
           {% if (otel_version_check.result.version if otel_version_check is defined else '') == otel_expected_version %}
-          Installed Otel version already matches {{ otel_expected_version }}
+          Installed Otel version already matches expected version {{ otel_expected_version }} (No action required)
           {% else %}
           Otel service startup mode is Disabled
           {% endif %}
       when:
-        - skip_remediation | default(false)
+        - skip_remediation | default(false) | bool
         - otel_service_info.services | length > 0
 
     - name: Record overall remediation skip
       ansible.builtin.set_fact:
-        remediation_actions: "{{ remediation_actions + ['SKIPPED - ' ~ (skip_reason | trim)] }}"
-      when: skip_remediation | default(false)
-    
-    - name: End host run if remediation is skipped
-      ansible.builtin.meta: end_host
-      when: skip_remediation | default(false)
+        remediation_actions: "{{ remediation_actions + ['NO ACTION REQUIRED - ' ~ (skip_reason | trim)] }}"
+      when: skip_remediation | default(false) | bool
+
+    # The 'ansible.builtin.meta: end_host' task is removed here so the remaining tasks can complete to summary
 
     - name: Check Otel log file size
       ansible.windows.win_powershell:
@@ -260,7 +258,7 @@
               }
           }
       register: otel_log_info
-      when: not (skip_remediation | default(false))
+      when: not (skip_remediation | default(false) | bool)
 
     - name: Read current Otel configuration
       ansible.windows.win_powershell:
@@ -298,14 +296,12 @@
               spike_key_present = $spike.Success
           }
       register: otel_config_info
-      when: not (skip_remediation | default(false))
+      when: not (skip_remediation | default(false) | bool)
 
     # Clean up old log entries
-    # Retain latest 500 lines if file exceeds 5 MB
 
     - name: Clean up Otel log file
       block:
-
         - name: Retain latest 500 log entries
           ansible.windows.win_powershell:
             script: |
@@ -313,11 +309,9 @@
               $maxSize = {{ otel_max_log_size }}
 
               if (Test-Path -LiteralPath $path) {
-
                   $file = Get-Item -LiteralPath $path
 
                   if ($file.Length -gt $maxSize) {
-
                       $content = Get-Content -LiteralPath $path -ErrorAction Stop |
                           Select-Object -Last {{ otel_keep_log_lines }}
 
@@ -363,14 +357,13 @@
           when: not (log_cleanup_result.result.success | default(false))
 
       rescue:
-
         - name: Record log cleanup failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Log cleanup: unexpected error during cleanup'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_log_info.result.exists | default(false)
         - otel_log_info.result.size | int > otel_max_log_size
 
@@ -383,7 +376,7 @@
              else 'file size is within the configured 5 MiB threshold')
           ] }}
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - not (otel_log_info.result.exists | default(false) or
                (otel_log_info.result.size | int > otel_max_log_size))
 
@@ -392,14 +385,13 @@
         remediation_failure: "{{ remediation_failure | int + 1 }}"
         remediation_actions: "{{ remediation_actions + ['FAILED - Configuration: Otel config file is missing; configuration was not modified'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - not (otel_config_info.result.config_exists | default(false) | bool)
 
     # Update memory limit
 
     - name: Update Otel memory limit
       block:
-
         - name: Configure memory limit to 650 MiB
           ansible.windows.win_lineinfile:
             path: "{{ otel_config_file }}"
@@ -438,14 +430,13 @@
           when: not (memory_validation.result.success | default(false))
 
       rescue:
-
         - name: Record memory update failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Memory limit: unexpected error during update'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - otel_config_info.result.memory_key_present | default(false) | bool
         - otel_config_info.result.memory_limit | default('') != (otel_memory_limit | string)
@@ -455,7 +446,7 @@
         remediation_failure: "{{ remediation_failure | int + 1 }}"
         remediation_actions: "{{ remediation_actions + ['FAILED - Memory limit: limit_mib key is missing; configuration was not modified'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - not (otel_config_info.result.memory_key_present | default(false) | bool)
 
@@ -463,7 +454,7 @@
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - Memory limit: already set to ' ~ (otel_memory_limit | string) ~ ' MiB'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - otel_config_info.result.memory_key_present | default(false) | bool
         - otel_config_info.result.memory_limit | default('') == (otel_memory_limit | string)
@@ -472,7 +463,6 @@
 
     - name: Update Otel spike limit
       block:
-
         - name: Configure spike limit to 130 MiB
           ansible.windows.win_lineinfile:
             path: "{{ otel_config_file }}"
@@ -511,14 +501,13 @@
           when: not (spike_validation.result.success | default(false))
 
       rescue:
-
         - name: Record spike update failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Spike limit: unexpected error during update'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - otel_config_info.result.spike_key_present | default(false) | bool
         - otel_config_info.result.spike_limit | default('') != (otel_spike_limit | string)
@@ -528,7 +517,7 @@
         remediation_failure: "{{ remediation_failure | int + 1 }}"
         remediation_actions: "{{ remediation_actions + ['FAILED - Spike limit: spike_limit_mib key is missing; configuration was not modified'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - not (otel_config_info.result.spike_key_present | default(false) | bool)
 
@@ -536,7 +525,7 @@
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - Spike limit: already set to ' ~ (otel_spike_limit | string) ~ ' MiB'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_config_info.result.config_exists | default(false) | bool
         - otel_config_info.result.spike_key_present | default(false) | bool
         - otel_config_info.result.spike_limit | default('') == (otel_spike_limit | string)
@@ -545,7 +534,6 @@
 
     - name: Restart Otel service after configuration changes
       block:
-
         - name: Restart Otel service
           ansible.windows.win_service:
             name: "{{ otel_service_name }}"
@@ -570,28 +558,26 @@
           when: otel_restart_validation.services[0].state != 'started'
 
       rescue:
-
         - name: Record service restart failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Otel service: unexpected error during restart'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - config_changed | bool
 
     - name: Record service restart skipped
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - Service restart: no configuration changes were made'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - not (config_changed | bool)
 
     # Set service startup type to Automatic Delayed Start
 
     - name: Configure Otel service startup type
       block:
-
         - name: Set Otel service to Automatic Delayed Start
           ansible.windows.win_service:
             name: "{{ otel_service_name }}"
@@ -616,28 +602,26 @@
           when: startup_validation.services[0].start_mode != 'delayed'
 
       rescue:
-
         - name: Record startup configuration failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Service startup: unexpected error configuring delayed start'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_service_info.services[0].start_mode != 'delayed'
 
     - name: Record startup configuration skipped
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - Service startup: already set to Automatic Delayed Start'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_service_info.services[0].start_mode == 'delayed'
 
     # Start Otel service if not running
 
     - name: Start Otel service if stopped
       block:
-
         - name: Ensure Otel service is running
           ansible.windows.win_service:
             name: "{{ otel_service_name }}"
@@ -662,21 +646,20 @@
           when: service_start_validation.services[0].state != 'started'
 
       rescue:
-
         - name: Record service start failure
           ansible.builtin.set_fact:
             remediation_failure: "{{ remediation_failure | int + 1 }}"
             remediation_actions: "{{ remediation_actions + ['FAILED - Otel service: unexpected error while starting'] }}"
 
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_service_info.services[0].state != 'started'
 
     - name: Record service start skipped
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - Otel service: already running'] }}"
       when:
-        - not (skip_remediation | default(false))
+        - not (skip_remediation | default(false) | bool)
         - otel_service_info.services[0].state == 'started'
 
     # Calculate final exit code
@@ -684,7 +667,7 @@
     - name: Determine final remediation exit code
       ansible.builtin.set_fact:
         exit_code: >-
-          {% if skip_remediation | default(false) %}
+          {% if skip_remediation | default(false) | bool %}
           0
           {% elif remediation_success | int > 0 and remediation_failure | int == 0 %}
           1
@@ -704,6 +687,7 @@
           {{
             [
               "========== OTEL REMEDIATION SUMMARY ==========",
+              "Status: " ~ ("NO ACTION REQUIRED" if (skip_remediation | default(false) | bool) else "REMEDIATION PROCESSED"),
               "Actions:"
             ]
             +
