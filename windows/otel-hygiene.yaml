@@ -228,7 +228,7 @@
           {% if (otel_version_check.result.version if otel_version_check is defined else '') == otel_expected_version %}
           Installed Otel version already matches expected version {{ otel_expected_version }} (No action required)
           {% else %}
-          Otel service version: 0.96.0.0
+          Either Otel version matches 0.96.0.0 or the service startup mode is Disabled.
           {% endif %}
       when:
         - skip_remediation | default(false) | bool
