@@ -108,8 +108,10 @@
       ansible.builtin.set_fact:
         remediation_actions: "{{ remediation_actions + ['SKIPPED - ' ~ (skip_reason | trim)] }}"
       when: skip_remediation | default(false)
-
-    # Check whether remediation is required
+    
+    - name: End host run if remediation is skipped
+      ansible.builtin.meta: end_host
+      when: skip_remediation | default(false)
 
     - name: Check Otel log file size
       ansible.windows.win_powershell:
@@ -569,14 +571,22 @@
 
     - name: Display Otel remediation summary
       ansible.builtin.debug:
-        msg:
-          - "========== OTEL REMEDIATION SUMMARY =========="
-          - "Actions:"
-          - "{{ '- ' ~ (remediation_actions | join('\\n- ')) if remediation_actions | length > 0 else 'No remediation actions recorded' }}"
-          - "Successful actions: {{ remediation_success | int }}"
-          - "Failed actions: {{ remediation_failure | int }}"
-          - "Final Exit Code: {{ exit_code | trim }}"
-          - "=============================================="
+        msg: >-
+          {{
+            [
+              "========== OTEL REMEDIATION SUMMARY ==========",
+              "Actions:"
+            ]
+            +
+            (remediation_actions if (remediation_actions | length > 0) else ["- No remediation actions recorded"])
+            +
+            [
+              "Successful actions: " ~ (remediation_success | int),
+              "Failed actions: " ~ (remediation_failure | int),
+              "Final Exit Code: " ~ (exit_code | trim),
+              "=============================================="
+            ]
+          }}
 
     # Publish exit code for AAP
 
