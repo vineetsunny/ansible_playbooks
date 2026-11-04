@@ -5,8 +5,8 @@
 
   vars:
     otel_service_name: "Otel"
-    #otel_expected_version: "0.96.0.0"
-    otel_expected_version: "0.164.0"
+    otel_expected_version: "0.96.0.0"
+    #otel_expected_version: "0.164.0"
     otel_log_file: 'C:\Windows\CWS Build\Logs\otel-debug.log'
     otel_max_log_size: 5242880
     otel_keep_log_lines: 500
