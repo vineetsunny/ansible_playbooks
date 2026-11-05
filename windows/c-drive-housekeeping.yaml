@@ -224,7 +224,6 @@
           - "               DRIVE C: HOUSEKEEPING SUMMARY             "
           - "=========================================================="
           - " Host             : {{ inventory_hostname }}"
-          - " Execution Status : {{ cleanup_metrics.Status }} (Exit Code: {{ cleanup_metrics.ExitCode }})"
           - " Total Drive Size : {{ cleanup_metrics.TotalSizeGB }} GB"
           - " Pre-cleanup Free : {{ cleanup_metrics.InitialFreeGB }} GB ({{ cleanup_metrics.InitialFreePct }}%)"
           - " Post-cleanup Free: {{ cleanup_metrics.FinalFreeGB }} GB ({{ cleanup_metrics.FinalFreePct }}%)"
@@ -232,4 +231,5 @@
           - " Action Items Hit : {{ cleanup_metrics.ActionsCount }}"
           - " Message          : {{ cleanup_metrics.Message }}"
           - " Log Location     : C:\\Windows\\Build\\logs\\C_Housekeeping_ARF\\C_Housekeeping_ARF.log"
+          - " Execution Status : {{ cleanup_metrics.Status }} (Exit Code: {{ cleanup_metrics.ExitCode }})"
           - "=========================================================="
