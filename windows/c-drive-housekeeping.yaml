@@ -1,6 +1,6 @@
 ---
 - name: Windows Drive C Disk Housekeeping & Remediation
-  hosts: windows
+  hosts: test-vm
   gather_facts: false
   tasks:
     - name: Run C Drive Housekeeping Script
