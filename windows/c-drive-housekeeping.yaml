@@ -1,3 +1,54 @@
+# =============================================================================
+# Playbook Name : c-cdrive-housekeeping.yaml
+#
+# Description   : C: drive housekeeping on Windows VMs, including
+#                 temporary file cleanup, historical log removal, IIS log
+#                 cleanup, memory dump removal, SCCM cache cleanup, and
+#                 shadow copy management.
+#
+# Purpose       : Reclaim C: drive disk space by removing files and cached
+#                 data older than configured retention periods and limiting
+#                 shadow copy storage consumption.
+#
+# Scope         : Windows servers / VMs
+# Target FS     : C:
+# Trigger       : Remediation runs only when C: drive free space is below 20%.
+#                 If free space is >= 20%, no action is required.
+#
+# Retention     : 7 days  - C:\Temp, C:\Windows\Temp, memory dumps,
+#                           SCCM cache and shadow copies.
+#                 15 days - Troubleshooting logs, security event logs,
+#                           ConfigurationStatus, Windows PatchCache,
+#                           and Recycle Bin.
+#                 30 days - IIS log files.
+#
+# Log Path      : C:\Windows\Build\logs\C_Housekeeping_ARF\
+# Log File      : C:\Windows\Build\logs\C_Housekeeping_ARF\C_Housekeeping_ARF.log
+#
+#
+# Execution     : ansible-playbook -i inventory c-cdrive-housekeeping.yaml
+#
+# Important     : If C: drive free space is >= 20%, cleanup is skipped.
+#                 Cleanup is based on file LastWriteTime for configured
+#                 directories and logs.
+#                 SCCM cache entries are removed based on LastReferenceTime.
+#                 Shadow copies older than 7 days are deleted.
+#                 Unbounded shadow storage is resized to a maximum of 10%.
+#                 Cleanup actions run whenever the Ansible playbook executes.
+#                 Deleted files and shadow copies cannot be recovered through
+#                 this playbook.
+#
+# Exit Codes    : 0  - No remediation required (free space >= 20%).
+#                 1  - Cleanup successful (free space >= 20% after cleanup).
+#                 2  - Partial cleanup (free space still below 20%).
+#                 3  - No cleanup performed.
+#                 20 - Execution failed.
+#
+# Output        : Pre-cleanup and post-cleanup disk metrics, recovered space,
+#                 action count, execution status, and exit code.
+#
+# Version       : 1.0
+# =============================================================================
 ---
 - name: Windows Drive C Disk Housekeeping & Remediation
   hosts: test-vm
