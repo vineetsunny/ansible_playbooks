@@ -56,20 +56,21 @@
   tasks:
     - name: Run C Drive Housekeeping Script
       ansible.windows.win_shell: |
+        {% raw %}
         $ErrorActionPreference = 'SilentlyContinue'
 
-        $LogFolder = "C:\Windows\Build\logs\C_Housekeeping_ARF"
-        $LogFile = "$LogFolder\C_Housekeeping_ARF.log"
+        $LogFolder = 'C:\Windows\Build\logs\C_Housekeeping_ARF'
+        $LogFile = Join-Path -Path $LogFolder -ChildPath 'C_Housekeeping_ARF.log'
 
         if (!(Test-Path -Path $LogFolder)) {
             New-Item -ItemType Directory -Path $LogFolder -Force | Out-Null
         }
         if (!(Test-Path -Path $LogFile)) {
             New-Item -ItemType File -Path $LogFile -Force | Out-Null
-        } else {
-            Clear-Content -Path $LogFile -Force
         }
-        Get-Date | Out-File -FilePath $LogFile -Append
+
+        # 1. Append logs instead of clearing/overwriting
+        "`r`n`r`n============================== [ RUN: $(Get-Date) ] ==============================" | Out-File -FilePath $LogFile -Append
 
         # Helper to retrieve C: disk metrics
         function Get-CDiskInfo {
@@ -87,11 +88,36 @@
         $initDisk = Get-CDiskInfo
         $initialFreePct = $initDisk.FreePercent
 
+        # 2. Ensure C:\SYS\evtlog\sec\ exists and populate files older than 15 days if unavailable/empty
+        $secEvtPath = 'C:\SYS\evtlog\sec'
+        if (!(Test-Path -Path $secEvtPath)) {
+            New-Item -ItemType Directory -Path $secEvtPath -Force | Out-Null
+        }
+        $existingSecFiles = Get-ChildItem -Path $secEvtPath -File -ErrorAction SilentlyContinue
+        if (!$existingSecFiles) {
+            $sampleSecFile = Join-Path -Path $secEvtPath -ChildPath 'archive_sec_event.evtx'
+            New-Item -ItemType File -Path $sampleSecFile -Force | Out-Null
+            (Get-Item $sampleSecFile).LastWriteTime = (Get-Date).AddDays(-20)
+            "Created missing folder and seed file older than 15 days at: $sampleSecFile" | Out-File -FilePath $LogFile -Append
+        }
+
+        # 3. Create old files (>15 days) in ConfigurationStatus (Protected - Not Deleted)
+        $configStatusPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
+        if (!(Test-Path -Path $configStatusPath)) {
+            New-Item -ItemType Directory -Path $configStatusPath -Force | Out-Null
+        }
+        $sampleConfigFile = Join-Path -Path $configStatusPath -ChildPath 'status_record_archive.mof'
+        if (!(Test-Path -Path $sampleConfigFile)) {
+            New-Item -ItemType File -Path $sampleConfigFile -Force | Out-Null
+            (Get-Item $sampleConfigFile).LastWriteTime = (Get-Date).AddDays(-25)
+            "Created old file (>15 days, retained) at: $sampleConfigFile" | Out-File -FilePath $LogFile -Append
+        }
+
         # Check threshold (Skip cleanup if free space >= 20%)
         if ($initialFreePct -ge 20) {
             "Free space >= 20% ($initialFreePct%). No remediation required." | Out-File -FilePath $LogFile -Append
             $resultObj = [PSCustomObject]@{
-                Status          = "OUT_OF_SCOPE"
+                Status          = 'OUT_OF_SCOPE'
                 ExitCode        = 0
                 InitialFreePct  = $initialFreePct
                 FinalFreePct    = $initialFreePct
@@ -99,7 +125,7 @@
                 FinalFreeGB     = $initDisk.FreeGB
                 TotalSizeGB     = $initDisk.TotalGB
                 ActionsCount    = 0
-                Message         = "Free space is above 20%. No action needed."
+                Message         = 'Free space is above 20%. No action needed.'
             }
             Write-Output ($resultObj | ConvertTo-Json -Compress)
             exit 0
@@ -129,16 +155,15 @@
 
         try {
             # 1. 7-Day Cleanup Paths
-            $targets_7d = @("C:\Temp\", "C:\Windows\Temp\")
+            $targets_7d = @('C:\Temp', 'C:\Windows\Temp')
             Clean-DirectoryAge -Paths $targets_7d -Days 7
 
-            # 2. 15-Day Cleanup Paths
+            # 2. 15-Day Cleanup Paths (ConfigurationStatus excluded to protect from deletion)
             $targets_15d = @(
-                "C:\SYS\PERFLOG\Troubleshoot_CTR\",
-                "C:\SYS\evtlog\sec\",
-                "C:\Windows\System32\Configuration\ConfigurationStatus\",
-                "C:\Windows\Installer\`$PatchCache`$\Managed\",
-                "C:\`$Recycle.Bin\"
+                'C:\SYS\PERFLOG\Troubleshoot_CTR',
+                'C:\SYS\evtlog\sec',
+                'C:\Windows\Installer\$PatchCache$\Managed',
+                'C:\$Recycle.Bin'
             )
             Clean-DirectoryAge -Paths $targets_15d -Days 15
 
@@ -153,7 +178,7 @@
                             $siteLogPath = Join-Path -Path $rawDir -ChildPath "W3SVC$($site.id)"
                             if (Test-Path $siteLogPath) {
                                 $iisCutoff = (Get-Date).AddDays(-30)
-                                $oldLogs = Get-ChildItem -Path $siteLogPath -Filter "*.log" -Force -ErrorAction SilentlyContinue | 
+                                $oldLogs = Get-ChildItem -Path $siteLogPath -Filter '*.log' -Force -ErrorAction SilentlyContinue | 
                                            Where-Object { $_.LastWriteTime -lt $iisCutoff }
                                 if ($oldLogs) {
                                     $oldLogs | ForEach-Object { $_.FullName } | Out-File -FilePath $LogFile -Append
@@ -168,7 +193,7 @@
 
             # 4. Windows Memory Dumps (>7 days)
             $memCutoff = (Get-Date).AddDays(-7)
-            $dumps = Get-ChildItem -Path "C:\Windows\" -Filter "mem*.dmp*" -Force -ErrorAction SilentlyContinue | 
+            $dumps = Get-ChildItem -Path 'C:\Windows' -Filter 'mem*.dmp*' -Force -ErrorAction SilentlyContinue | 
                      Where-Object { $_.LastWriteTime -lt $memCutoff }
             if ($dumps) {
                 $dumps | ForEach-Object { $_.FullName } | Out-File -FilePath $LogFile -Append
@@ -178,7 +203,7 @@
 
             # 5. SCCM / CCMCache cleanup (>7 days)
             try {
-                $uiResMgr = New-Object -ComObject "UIResource.UIResourceMgr"
+                $uiResMgr = New-Object -ComObject 'UIResource.UIResourceMgr'
                 $cacheInfo = $uiResMgr.GetCacheInfo()
                 $ccmCutoff = (Get-Date).AddDays(-7)
                 $oldCcmElements = $cacheInfo.GetCacheElements() | 
@@ -190,7 +215,10 @@
                     }
                     $actionsCount++
                 }
-            } catch {}
+            } catch {
+                # Suppress COM errors if SCCM is not installed
+                $null = $_
+            }
 
             # 6. Shadow Copies (>7 days) and Storage Limit Resize
             try {
@@ -213,14 +241,16 @@
                            Where-Object { $_.Volume -match [regex]::Escape($cVol.DeviceID) }
                 if ($storage.MaxSpace -eq 18446744073709551615 -or $storage.MaxSpace -eq 9223372036854775807) {
                     vssadmin resize shadowstorage /for=C: /on=C: /maxsize=10% | Out-Null
-                    "Shadow copy size resized to 10%" | Out-File -FilePath $LogFile -Append
+                    'Shadow copy size resized to 10%' | Out-File -FilePath $LogFile -Append
                     $actionsCount++
                 }
-            } catch {}
+            } catch {
+                $null = $_
+            }
 
         } catch {
             $errObj = [PSCustomObject]@{
-                Status          = "EXECUTION_FAILED"
+                Status          = 'EXECUTION_FAILED'
                 ExitCode        = 20
                 InitialFreePct  = $initialFreePct
                 FinalFreePct    = (Get-CDiskInfo).FreePercent
@@ -237,13 +267,13 @@
 
         if ($actionsCount -gt 0 -and $finalFreePct -ge 20) {
             $exitCode = 1
-            $status = "SUCCESSFUL_CLEANUP"
+            $status = 'SUCCESSFUL_CLEANUP'
         } elseif ($actionsCount -gt 0 -and $finalFreePct -lt 20) {
             $exitCode = 2
-            $status = "PARTIAL_CLEANUP"
+            $status = 'PARTIAL_CLEANUP'
         } else {
             $exitCode = 3
-            $status = "NO_CLEANUP_PERFORMED"
+            $status = 'NO_CLEANUP_PERFORMED'
         }
 
         $resultObj = [PSCustomObject]@{
@@ -255,11 +285,12 @@
             FinalFreeGB     = $finalDisk.FreeGB
             TotalSizeGB     = $finalDisk.TotalGB
             ActionsCount    = $actionsCount
-            Message         = "Remediation executed."
+            Message         = 'Remediation executed.'
         }
 
         Write-Output ($resultObj | ConvertTo-Json -Compress)
         exit $exitCode
+        {% endraw %}
       register: housekeeping_raw
       failed_when: housekeeping_raw.rc == 20
       changed_when: housekeeping_raw.rc in [1, 2]
