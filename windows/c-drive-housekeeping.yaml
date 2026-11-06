@@ -19,7 +19,7 @@
 #                           SCCM cache and shadow copies.
 #                 15 days - Troubleshooting logs, security event logs,
 #                           Windows PatchCache, and Recycle Bin.
-#                 30 days - IIS log files. (location need to be defined)
+#                 30 days - IIS log files.
 #
 # Log Path      : C:\Windows\Build\logs\C_Housekeeping_ARF\
 # Log File      : C:\Windows\Build\logs\C_Housekeeping_ARF\C_Housekeeping_ARF.log
