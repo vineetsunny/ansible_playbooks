@@ -18,36 +18,11 @@
 # Retention     : 7 days  - C:\Temp, C:\Windows\Temp, memory dumps,
 #                           SCCM cache and shadow copies.
 #                 15 days - Troubleshooting logs, security event logs,
-#                           ConfigurationStatus, Windows PatchCache,
-#                           and Recycle Bin.
-#                 30 days - IIS log files.
+#                           Windows PatchCache, and Recycle Bin.
+#                 30 days - IIS log files. (location need to be defined)
 #
 # Log Path      : C:\Windows\Build\logs\C_Housekeeping_ARF\
 # Log File      : C:\Windows\Build\logs\C_Housekeeping_ARF\C_Housekeeping_ARF.log
-#
-#
-# Execution     : ansible-playbook -i inventory c-cdrive-housekeeping.yaml
-#
-# Important     : If C: drive free space is >= 20%, cleanup is skipped.
-#                 Cleanup is based on file LastWriteTime for configured
-#                 directories and logs.
-#                 SCCM cache entries are removed based on LastReferenceTime.
-#                 Shadow copies older than 7 days are deleted.
-#                 Unbounded shadow storage is resized to a maximum of 10%.
-#                 Cleanup actions run whenever the Ansible playbook executes.
-#                 Deleted files and shadow copies cannot be recovered through
-#                 this playbook.
-#
-# Exit Codes    : 0  - No remediation required (free space >= 20%).
-#                 1  - Cleanup successful (free space >= 20% after cleanup).
-#                 2  - Partial cleanup (free space still below 20%).
-#                 3  - No cleanup performed.
-#                 20 - Execution failed.
-#
-# Output        : Pre-cleanup and post-cleanup disk metrics, recovered space,
-#                 action count, execution status, and exit code.
-#
-# Version       : 1.0
 # =============================================================================
 ---
 - name: Windows Drive C Disk Housekeeping & Remediation
@@ -66,10 +41,10 @@
         }
         if (!(Test-Path -Path $LogFile)) {
             New-Item -ItemType File -Path $LogFile -Force | Out-Null
-        } else {
-            Clear-Content -Path $LogFile -Force
         }
-        Get-Date | Out-File -FilePath $LogFile -Append
+
+        # 1. Append logs instead of clearing/overwriting
+        "`r`n`r`n============================== [ RUN: $(Get-Date) ] ==============================" | Out-File -FilePath $LogFile -Append
 
         # Helper to retrieve C: disk metrics
         function Get-CDiskInfo {
@@ -86,6 +61,31 @@
 
         $initDisk = Get-CDiskInfo
         $initialFreePct = $initDisk.FreePercent
+
+        # 2. Ensure C:\SYS\evtlog\sec\ exists and populate files older than 15 days if unavailable/empty
+        $secEvtPath = "C:\SYS\evtlog\sec"
+        if (!(Test-Path -Path $secEvtPath)) {
+            New-Item -ItemType Directory -Path $secEvtPath -Force | Out-Null
+        }
+        $existingSecFiles = Get-ChildItem -Path $secEvtPath -File -ErrorAction SilentlyContinue
+        if (!$existingSecFiles) {
+            $sampleSecFile = Join-Path -Path $secEvtPath -ChildPath "archive_sec_event.evtx"
+            New-Item -ItemType File -Path $sampleSecFile -Force | Out-Null
+            (Get-Item $sampleSecFile).LastWriteTime = (Get-Date).AddDays(-20)
+            "Created missing folder and seed file older than 15 days at: $sampleSecFile" | Out-File -FilePath $LogFile -Append
+        }
+
+        # 3. Create old files (>15 days) in ConfigurationStatus (Protected - Not Deleted)
+        $configStatusPath = "C:\Windows\System32\Configuration\ConfigurationStatus"
+        if (!(Test-Path -Path $configStatusPath)) {
+            New-Item -ItemType Directory -Path $configStatusPath -Force | Out-Null
+        }
+        $sampleConfigFile = Join-Path -Path $configStatusPath -ChildPath "status_record_archive.mof"
+        if (!(Test-Path -Path $sampleConfigFile)) {
+            New-Item -ItemType File -Path $sampleConfigFile -Force | Out-Null
+            (Get-Item $sampleConfigFile).LastWriteTime = (Get-Date).AddDays(-25)
+            "Created old file (>15 days, retained) at: $sampleConfigFile" | Out-File -FilePath $LogFile -Append
+        }
 
         # Check threshold (Skip cleanup if free space >= 20%)
         if ($initialFreePct -ge 20) {
@@ -132,11 +132,10 @@
             $targets_7d = @("C:\Temp\", "C:\Windows\Temp\")
             Clean-DirectoryAge -Paths $targets_7d -Days 7
 
-            # 2. 15-Day Cleanup Paths
+            # 2. 15-Day Cleanup Paths (ConfigurationStatus excluded to avoid deletion)
             $targets_15d = @(
                 "C:\SYS\PERFLOG\Troubleshoot_CTR\",
                 "C:\SYS\evtlog\sec\",
-                "C:\Windows\System32\Configuration\ConfigurationStatus\",
                 "C:\Windows\Installer\`$PatchCache`$\Managed\",
                 "C:\`$Recycle.Bin\"
             )
