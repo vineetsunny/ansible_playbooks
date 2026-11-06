@@ -53,7 +53,15 @@
 # =============================================================================
 # Playbook Name : c-cdrive-housekeeping.yaml
 #
-# Description   : C: drive housekeeping with per-directory audit tracking.
+# Target Scope:
+#   1. C:\Temp\                                   (>7 days)
+#   2. C:\Windows\Temp\                           (>7 days)
+#   3. C:\SYS\PERFLOG\Troubleshoot_CTR\           (>15 days)
+#   4. C:\SYS\evtlog\sec\                         (>15 days)
+#   5. C:\Windows\Installer\$PatchCache$\Managed\ (>15 days)
+#   6. C:\$Recycle.Bin\                           (>15 days)
+#   7. IIS logs (C:\inetpub\logs\LogFiles)        (>30 days, *.log)
+#   8. C:\Windows\                                (>7 days, mem*.dmp*)
 # =============================================================================
 ---
 - name: Windows Drive C Disk Housekeeping & Remediation
@@ -92,7 +100,7 @@
         $initDisk = Get-CDiskInfo
         $initialFreePct = $initDisk.FreePercent
 
-        # 1. Seed missing target for testing if not available
+        # Seed missing target for testing if not available
         $secEvtPath = 'C:\SYS\evtlog\sec'
         if (!(Test-Path -Path $secEvtPath)) {
             New-Item -ItemType Directory -Path $secEvtPath -Force | Out-Null
@@ -105,7 +113,7 @@
             "Created missing folder and seed file older than 15 days at: $sampleSecFile" | Out-File -FilePath $LogFile -Append
         }
 
-        # 2. Seed ConfigurationStatus file (Protected - No Delete)
+        # Seed ConfigurationStatus file (Protected - No Delete)
         $configStatusPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
         if (!(Test-Path -Path $configStatusPath)) {
             New-Item -ItemType Directory -Path $configStatusPath -Force | Out-Null
@@ -117,7 +125,6 @@
             "Created old file (>15 days, retained) at: $sampleConfigFile" | Out-File -FilePath $LogFile -Append
         }
 
-        # Global counters & audit table
         $actionsCount = 0
         $directoryReports = [System.Collections.Generic.List[PSCustomObject]]::new()
 
@@ -140,148 +147,96 @@
             exit 0
         }
 
-        # Targeted directory age cleanup with per-directory audit
+        # Targeted directory age cleanup helper
         function Clean-DirectoryAge {
             param (
-                [string[]]$Paths,
+                [string]$Path,
                 [int]$Days,
-                [string]$Filter = "*"
+                [string]$Filter = "*",
+                [switch]$Recurse
             )
             $cutoff = (Get-Date).AddDays(-$Days)
+            $dirDeleted = 0
+            $dirFailed  = 0
+            $dirFound   = 0
 
-            foreach ($p in $Paths) {
-                $dirDeleted = 0
-                $dirFailed  = 0
-                $dirFound   = 0
+            if (Test-Path -Path $Path) {
+                $gciParams = @{
+                    Path        = $Path
+                    Filter      = $Filter
+                    Force       = $true
+                    ErrorAction = 'SilentlyContinue'
+                }
+                if ($Recurse) { $gciParams['Recurse'] = $true }
 
-                if (Test-Path -Path $p) {
-                    $items = Get-ChildItem -Path $p -Filter $Filter -Recurse -Force -ErrorAction SilentlyContinue | 
-                             Where-Object { -not $_.PSIsContainer -and $_.LastWriteTime -lt $cutoff }
-                    
-                    if ($items) {
-                        $dirFound = @($items).Count
-                        foreach ($item in $items) {
-                            try {
-                                Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
-                                "[DELETED] $($item.FullName)" | Out-File -FilePath $LogFile -Append
-                                $dirDeleted++
-                                $script:actionsCount++
-                            } catch {
-                                "[LOCKED/FAILED] $($item.FullName) - Reason: $($_.Exception.Message)" | Out-File -FilePath $LogFile -Append
-                                $dirFailed++
-                            }
+                $items = Get-ChildItem @gciParams | 
+                         Where-Object { -not $_.PSIsContainer -and $_.LastWriteTime -lt $cutoff }
+                
+                if ($items) {
+                    $dirFound = @($items).Count
+                    foreach ($item in $items) {
+                        try {
+                            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+                            "[DELETED] $($item.FullName)" | Out-File -FilePath $LogFile -Append
+                            $dirDeleted++
+                            $script:actionsCount++
+                        } catch {
+                            "[LOCKED/FAILED] $($item.FullName) - Reason: $($_.Exception.Message)" | Out-File -FilePath $LogFile -Append
+                            $dirFailed++
                         }
                     }
+                }
 
-                    if ($dirFound -eq 0) {
-                        $status = "NO_FILES_MATCHED"
-                    } elseif ($dirFailed -eq 0) {
-                        $status = "SUCCESS"
-                    } else {
-                        $status = "PARTIAL_FAILURE"
-                    }
+                if ($dirFound -eq 0) {
+                    $status = "NO_FILES_MATCHED"
+                } elseif ($dirFailed -eq 0) {
+                    $status = "SUCCESS"
                 } else {
-                    $status = "NOT_FOUND"
-                    "[SKIPPED] Path does not exist: $p" | Out-File -FilePath $LogFile -Append
+                    $status = "PARTIAL_FAILURE"
                 }
-
-                $dirReport = [PSCustomObject]@{
-                    Path    = $p
-                    Days    = $Days
-                    Status  = $status
-                    Found   = $dirFound
-                    Deleted = $dirDeleted
-                    Failed  = $dirFailed
-                }
-                $script:directoryReports.Add($dirReport)
-                "DIR_SUMMARY: [$status] $p (Found: $dirFound, Deleted: $dirDeleted, Failed: $dirFailed)" | Out-File -FilePath $LogFile -Append
+            } else {
+                $status = "NOT_FOUND"
+                "[SKIPPED] Path does not exist: $Path" | Out-File -FilePath $LogFile -Append
             }
+
+            $dirReport = [PSCustomObject]@{
+                Path    = $Path
+                Days    = $Days
+                Filter  = $Filter
+                Status  = $status
+                Found   = $dirFound
+                Deleted = $dirDeleted
+                Failed  = $dirFailed
+            }
+            $script:directoryReports.Add($dirReport)
+            "DIR_SUMMARY: [$status] $Path (Filter: $Filter, Found: $dirFound, Deleted: $dirDeleted, Failed: $dirFailed)" | Out-File -FilePath $LogFile -Append
         }
 
         try {
-            # 1. 7-Day Cleanup Paths
-            $targets_7d = @(
-                'C:\Temp',
-                'C:\Windows\Temp',
-                'C:\Windows\SoftwareDistribution\Download'
-            )
-            Clean-DirectoryAge -Paths $targets_7d -Days 7
+            # 1. C:\Temp\ (>7 days)
+            Clean-DirectoryAge -Path 'C:\Temp' -Days 7 -Recurse
 
-            # 2. 15-Day Cleanup Paths
-            $targets_15d = @(
-                'C:\SYS\PERFLOG\Troubleshoot_CTR',
-                'C:\SYS\evtlog\sec',
-                'C:\Windows\Installer\$PatchCache$\Managed',
-                'C:\$Recycle.Bin',
-                'C:\ProgramData\Microsoft\Windows\WER\ReportArchive',
-                'C:\ProgramData\Microsoft\Windows\WER\ReportQueue'
-            )
-            Clean-DirectoryAge -Paths $targets_15d -Days 15
+            # 2. C:\Windows\Temp\ (>7 days)
+            Clean-DirectoryAge -Path 'C:\Windows\Temp' -Days 7 -Recurse
 
-            # 3. CBS Persistent Logs (>15 days)
-            Clean-DirectoryAge -Paths @('C:\Windows\Logs\CBS') -Days 15 -Filter 'CbsPersist_*.log'
+            # 3. C:\SYS\PERFLOG\Troubleshoot_CTR\ (>15 days)
+            Clean-DirectoryAge -Path 'C:\SYS\PERFLOG\Troubleshoot_CTR' -Days 15 -Recurse
 
-            # 4. IIS Logs (>30 days)
-            $iisLogCandidates = @(
-                'C:\inetpub\logs\LogFiles',
-                'C:\Windows\System32\LogFiles\HTTPERR',
-                'C:\Windows\System32\LogFiles\W3SVC1'
-            )
-            Clean-DirectoryAge -Paths $iisLogCandidates -Days 30 -Filter '*.log'
+            # 4. C:\SYS\evtlog\sec\ (>15 days)
+            Clean-DirectoryAge -Path 'C:\SYS\evtlog\sec' -Days 15 -Recurse
 
-            # 5. Windows Memory Dumps (>7 days)
-            Clean-DirectoryAge -Paths @('C:\Windows') -Days 7 -Filter 'mem*.dmp*'
-            Clean-DirectoryAge -Paths @('C:\Windows\Minidump') -Days 7 -Filter '*.dmp'
+            # 5. C:\Windows\Installer\$PatchCache$\Managed\ (>15 days)
+            Clean-DirectoryAge -Path 'C:\Windows\Installer\$PatchCache$\Managed' -Days 15 -Recurse
 
-            # 6. SCCM / CCMCache cleanup (>7 days)
-            try {
-                $uiResMgr = New-Object -ComObject 'UIResource.UIResourceMgr'
-                $cacheInfo = $uiResMgr.GetCacheInfo()
-                $ccmCutoff = (Get-Date).AddDays(-7)
-                $oldCcmElements = $cacheInfo.GetCacheElements() | 
-                                  Where-Object { [datetime]$_.LastReferenceTime -lt $ccmCutoff }
-                if ($oldCcmElements) {
-                    foreach ($elem in $oldCcmElements) {
-                        try {
-                            $cacheInfo.DeleteCacheElement($elem.CacheElementID)
-                            "[DELETED] CCMCache ID: $($elem.CacheElementID)" | Out-File -FilePath $LogFile -Append
-                            $actionsCount++
-                        } catch {
-                            "[FAILED] CCMCache ID: $($elem.CacheElementID) - Reason: $($_.Exception.Message)" | Out-File -FilePath $LogFile -Append
-                        }
-                    }
-                }
-            } catch {
-                "[SKIPPED] SCCM COM Object not found or unavailable." | Out-File -FilePath $LogFile -Append
-            }
+            # 6. C:\$Recycle.Bin\ (>15 days)
+            Clean-DirectoryAge -Path 'C:\$Recycle.Bin' -Days 15 -Recurse
 
-            # 7. Shadow Copies (>7 days) and Storage Limit Resize
-            try {
-                $cVol = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='C:'"
-                if ($cVol) {
-                    $shadows = Get-CimInstance -ClassName Win32_ShadowCopy | 
-                               Where-Object { $_.VolumeName -eq $cVol.DeviceID }
-                    $vssCutoff = (Get-Date).AddDays(-7)
-                    foreach ($s in $shadows) {
-                        $sDate = [System.Management.ManagementDateTimeConverter]::ToDateTime($s.InstallDate)
-                        if ($sDate -lt $vssCutoff) {
-                            $s | Remove-CimInstance -ErrorAction SilentlyContinue
-                            "[DELETED] Shadow Copy ID: $($s.ID)" | Out-File -FilePath $LogFile -Append
-                            $actionsCount++
-                        }
-                    }
-                }
+            # 7. IIS log directories (>30 days, *.log)
+            # Checked directly against the standard IIS root path without needing extra modules
+            Clean-DirectoryAge -Path 'C:\inetpub\logs\LogFiles' -Days 30 -Filter '*.log' -Recurse
 
-                $storage = Get-CimInstance -ClassName Win32_ShadowStorage | 
-                           Where-Object { $_.Volume -match [regex]::Escape($cVol.DeviceID) }
-                if ($storage.MaxSpace -eq 18446744073709551615 -or $storage.MaxSpace -eq 9223372036854775807) {
-                    vssadmin resize shadowstorage /for=C: /on=C: /maxsize=10% | Out-Null
-                    '[RESIZED] Shadow copy storage resized to 10%' | Out-File -FilePath $LogFile -Append
-                    $actionsCount++
-                }
-            } catch {
-                $null = $_
-            }
+            # 8. C:\Windows\ (mem*.dmp* >7 days, non-recursive)
+            Clean-DirectoryAge -Path 'C:\Windows' -Days 7 -Filter 'mem*.dmp*'
 
         } catch {
             $errObj = [PSCustomObject]@{
@@ -358,6 +313,7 @@
         msg: >-
           [{{ item.Status | default('N/A') }}]
           Path: {{ item.Path }} |
+          Filter: {{ item.Filter | default('*') }} |
           Age: >{{ item.Days }}d |
           Found: {{ item.Found }} |
           Deleted: {{ item.Deleted }} |
