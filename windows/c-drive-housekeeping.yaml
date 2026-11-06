@@ -1,67 +1,17 @@
 # =============================================================================
 # Playbook Name : c-cdrive-housekeeping.yaml
 #
-# Description   : C: drive housekeeping on Windows VMs, including
-#                 temporary file cleanup, historical log removal, IIS log
-#                 cleanup, memory dump removal, SCCM cache cleanup, and
-#                 shadow copy management.
-#
-# Purpose       : Reclaim C: drive disk space by removing files and cached
-#                 data older than configured retention periods and limiting
-#                 shadow copy storage consumption.
-#
-# Scope         : Windows servers / VMs
-# Target FS     : C:
-# Trigger       : Remediation runs only when C: drive free space is below 20%.
-#                 If free space is >= 20%, no action is required.
-#
 # Retention     : 7 days  - C:\Temp, C:\Windows\Temp, memory dumps,
 #                           SCCM cache and shadow copies.
 #                 15 days - Troubleshooting logs, security event logs,
-#                           ConfigurationStatus, Windows PatchCache,
-#                           and Recycle Bin.
+#                           Windows PatchCache, and Recycle Bin.
 #                 30 days - IIS log files.
-#
-# Log Path      : C:\Windows\Build\logs\C_Housekeeping_ARF\
-# Log File      : C:\Windows\Build\logs\C_Housekeeping_ARF\C_Housekeeping_ARF.log
-#
-#
-# Execution     : ansible-playbook -i inventory c-cdrive-housekeeping.yaml
-#
-# Important     : If C: drive free space is >= 20%, cleanup is skipped.
-#                 Cleanup is based on file LastWriteTime for configured
-#                 directories and logs.
-#                 SCCM cache entries are removed based on LastReferenceTime.
-#                 Shadow copies older than 7 days are deleted.
-#                 Unbounded shadow storage is resized to a maximum of 10%.
-#                 Cleanup actions run whenever the Ansible playbook executes.
-#                 Deleted files and shadow copies cannot be recovered through
-#                 this playbook.
 #
 # Exit Codes    : 0  - No remediation required (free space >= 20%).
 #                 1  - Cleanup successful (free space >= 20% after cleanup).
 #                 2  - Partial cleanup (free space still below 20%).
-#                 3  - No cleanup performed.
+#                 3  - No cleanup performed (space < 20%, but nothing qualified).
 #                 20 - Execution failed.
-#
-# Output        : Pre-cleanup and post-cleanup disk metrics, recovered space,
-#                 action count, execution status, and exit code.
-#
-# Version       : 1.0
-# =============================================================================
-
-# =============================================================================
-# Playbook Name : c-cdrive-housekeeping.yaml
-#
-# Target Scope:
-#   1. C:\Temp\                                   (>7 days)
-#   2. C:\Windows\Temp\                           (>7 days)
-#   3. C:\SYS\PERFLOG\Troubleshoot_CTR\           (>15 days)
-#   4. C:\SYS\evtlog\sec\                         (>15 days)
-#   5. C:\Windows\Installer\$PatchCache$\Managed\ (>15 days)
-#   6. C:\$Recycle.Bin\                           (>15 days)
-#   7. IIS logs (C:\inetpub\logs\LogFiles)        (>30 days, *.log)
-#   8. C:\Windows\                                (>7 days, mem*.dmp*)
 # =============================================================================
 ---
 - name: Windows Drive C Disk Housekeeping & Remediation
@@ -71,10 +21,10 @@
     - name: Run C Drive Housekeeping Script
       ansible.windows.win_shell: |
         {% raw %}
-        $ErrorActionPreference = 'SilentlyContinue'
+        $ErrorActionPreference = 'Stop'
 
         $LogFolder = 'C:\Windows\Build\logs\C_Housekeeping_ARF'
-        $LogFile = Join-Path -Path $LogFolder -ChildPath 'C_Housekeeping_ARF.log'
+        $LogFile   = Join-Path -Path $LogFolder -ChildPath 'C_Housekeeping_ARF.log'
 
         if (!(Test-Path -Path $LogFolder)) {
             New-Item -ItemType Directory -Path $LogFolder -Force | Out-Null
@@ -99,36 +49,10 @@
 
         $initDisk = Get-CDiskInfo
         $initialFreePct = $initDisk.FreePercent
-
-        # Seed missing target for testing if not available
-        $secEvtPath = 'C:\SYS\evtlog\sec'
-        if (!(Test-Path -Path $secEvtPath)) {
-            New-Item -ItemType Directory -Path $secEvtPath -Force | Out-Null
-        }
-        $existingSecFiles = Get-ChildItem -Path $secEvtPath -File -ErrorAction SilentlyContinue
-        if (!$existingSecFiles) {
-            $sampleSecFile = Join-Path -Path $secEvtPath -ChildPath 'archive_sec_event.evtx'
-            New-Item -ItemType File -Path $sampleSecFile -Force | Out-Null
-            (Get-Item $sampleSecFile).LastWriteTime = (Get-Date).AddDays(-20)
-            "Created missing folder and seed file older than 15 days at: $sampleSecFile" | Out-File -FilePath $LogFile -Append
-        }
-
-        # Seed ConfigurationStatus file (Protected - No Delete)
-        $configStatusPath = 'C:\Windows\System32\Configuration\ConfigurationStatus'
-        if (!(Test-Path -Path $configStatusPath)) {
-            New-Item -ItemType Directory -Path $configStatusPath -Force | Out-Null
-        }
-        $sampleConfigFile = Join-Path -Path $configStatusPath -ChildPath 'status_record_archive.mof'
-        if (!(Test-Path -Path $sampleConfigFile)) {
-            New-Item -ItemType File -Path $sampleConfigFile -Force | Out-Null
-            (Get-Item $sampleConfigFile).LastWriteTime = (Get-Date).AddDays(-25)
-            "Created old file (>15 days, retained) at: $sampleConfigFile" | Out-File -FilePath $LogFile -Append
-        }
-
         $actionsCount = 0
         $directoryReports = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-        # Check threshold (Skip cleanup if free space >= 20%)
+        # Exit early if remediation is not required
         if ($initialFreePct -ge 20) {
             "Free space >= 20% ($initialFreePct%). No remediation required." | Out-File -FilePath $LogFile -Append
             $resultObj = [PSCustomObject]@{
@@ -147,7 +71,7 @@
             exit 0
         }
 
-        # Targeted directory age cleanup helper
+        # Targeted directory cleanup helper
         function Clean-DirectoryAge {
             param (
                 [string]$Path,
@@ -232,11 +156,43 @@
             Clean-DirectoryAge -Path 'C:\$Recycle.Bin' -Days 15 -Recurse
 
             # 7. IIS log directories (>30 days, *.log)
-            # Checked directly against the standard IIS root path without needing extra modules
             Clean-DirectoryAge -Path 'C:\inetpub\logs\LogFiles' -Days 30 -Filter '*.log' -Recurse
 
-            # 8. C:\Windows\ (mem*.dmp* >7 days, non-recursive)
+            # 8. C:\Windows\ (mem*.dmp* >7 days)
             Clean-DirectoryAge -Path 'C:\Windows' -Days 7 -Filter 'mem*.dmp*'
+
+            # 9. SCCM Cache Cleanup (>7 days unused based on LastReferenceTime)
+            try {
+                $sccmClient = New-Object -ComObject UIResource.UIResourceMgr -ErrorAction SilentlyContinue
+                if ($sccmClient) {
+                    $cacheElement = $sccmClient.GetCacheInfo()
+                    $cutoffDate = (Get-Date).AddDays(-7)
+                    $cacheElements = $cacheElement.GetCacheElements()
+                    foreach ($elem in $cacheElements) {
+                        if ($elem.LastReferenceTime -lt $cutoffDate) {
+                            $cacheElement.DeleteCacheElement($elem.CacheElementID)
+                            "[DELETED SCCM] Cache Element ID: $($elem.CacheElementID)" | Out-File -FilePath $LogFile -Append
+                            $actionsCount++
+                        }
+                    }
+                }
+            } catch {
+                "[WARN] SCCM cache cleanup skipped or not present: $($_.Exception.Message)" | Out-File -FilePath $LogFile -Append
+            }
+
+            # 10. Shadow Copies (>7 days) and Resize Storage Limit to 10%
+            try {
+                $shadowCutoff = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
+                $vssadminDel = vssadmin delete shadows /for=C: /shadow=$shadowCutoff /quiet 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    "[SHADOW COPY] Deleted shadow copies older than 7 days." | Out-File -FilePath $LogFile -Append
+                    $actionsCount++
+                }
+                # Limit unbounded shadow copy storage to 10%
+                vssadmin resize shadowstorage /for=C: /on=C: /maxsize=10% 2>&1 | Out-Null
+            } catch {
+                "[WARN] Shadow copy management encountered an issue: $($_.Exception.Message)" | Out-File -FilePath $LogFile -Append
+            }
 
         } catch {
             $errObj = [PSCustomObject]@{
@@ -252,7 +208,7 @@
             exit 20
         }
 
-        # Evaluate final post-cleanup metrics
+        # Post-cleanup metrics and final exit code assignment
         $finalDisk = Get-CDiskInfo
         $finalFreePct = $finalDisk.FreePercent
 
@@ -284,7 +240,7 @@
         exit $exitCode
         {% endraw %}
       register: housekeeping_raw
-      failed_when: housekeeping_raw.rc == 20
+      failed_when: housekeeping_raw.rc not in [0, 1, 2, 3]
       changed_when: housekeeping_raw.rc in [1, 2]
 
     - name: Parse Remediation Output
