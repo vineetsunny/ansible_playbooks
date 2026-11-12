@@ -1,0 +1,299 @@
+---
+- name: Configure AAP Local Administrator Groups on Windows VMs
+  hosts: all
+  gather_facts: true
+  vars:
+    # CSV files live in the AAP Git Project under files/
+    aap_files_dir: "{{ playbook_dir }}/files"
+    network_id_path: 'C:\serverInfo\NetworkIdentifier'
+
+    # Override via AAP Job Template Extra Variables:
+    # true  = Standalone/WORKGROUP test VM (creates local test groups)
+    # false = Production AD-joined VM (adds domain AD groups)
+    local_test_mode: true
+
+    # ARF Exit Code & Status Tracking
+    exit_code: 0
+    exit_reason: "Initialized"
+    dc_group_status: "Not_Evaluated"
+    eip_group_status: "Not_Evaluated"
+    stop_processing: false
+
+  tasks:
+    - name: Execute AAP Local Admin Configuration with Exception Handling
+      block:
+        # ------------------------------------------------------------------
+        # 1. Read Multiple CSV Files from AAP Execution Environment (Git Repo)
+        # ------------------------------------------------------------------
+        - name: Load CSV mapping and exclusion files from AAP project
+          community.general.read_csv:
+            path: "{{ aap_files_dir }}/{{ item.file }}"
+          register: aap_csv_results
+          loop:
+            - { key: "mapping", file: "AAPMapping.csv" }
+            - { key: "server_excl", file: "AAP_Server_Exclusion.csv" }
+            - { key: "service_excl", file: "AAP_Service_Exclusion.csv" }
+          delegate_to: localhost
+          become: false
+
+        - name: Parse loaded CSV datasets into facts
+          ansible.builtin.set_fact:
+            aap_mapping_rows: "{{ (aap_csv_results.results | selectattr('item.key', 'equalto', 'mapping') | first).list }}"
+            server_exclusion_list: "{{ (aap_csv_results.results | selectattr('item.key', 'equalto', 'server_excl') | first).list | map(attribute='Servername') | map('trim') | map('lower') | list }}"
+            service_exclusion_list: "{{ (aap_csv_results.results | selectattr('item.key', 'equalto', 'service_excl') | first).list | map(attribute='Servicename') | map('trim') | map('lower') | list }}"
+
+        # ------------------------------------------------------------------
+        # 2. Check Domain Controller Role on Target Windows VM (Exit 24)
+        # ------------------------------------------------------------------
+        - name: Check ProductType registry key on target Windows VM
+          ansible.windows.win_reg_stat:
+            path: HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions
+            name: ProductType
+          register: reg_product_type
+
+        - name: Abort if target VM is a Domain Controller (Exit 24)
+          ansible.builtin.set_fact:
+            exit_code: 24
+            exit_reason: "Server is Domain Controller"
+            stop_processing: true
+          when: reg_product_type.value is defined and reg_product_type.value == "LanmanNT"
+
+        # ------------------------------------------------------------------
+        # 3. Query WMI Metadata & NetworkIdentifier on Target Windows VM
+        # ------------------------------------------------------------------
+        - name: Query HS_ServerData WMI class, Domain, and NetworkIdentifier
+          ansible.windows.win_powershell:
+            script: |
+              $ErrorActionPreference = 'Stop'
+
+              $serverData = Get-CimInstance -ClassName HS_ServerData -ErrorAction SilentlyContinue
+              if (-not $serverData -or [string]::IsNullOrWhiteSpace($serverData.Country)) {
+                  @{
+                      HasCountry = $false
+                      Country    = "Unknown"
+                  } | ConvertTo-Json -Compress
+                  exit 0
+              }
+
+              $domain      = (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+              $country     = $serverData.Country.Trim()
+              $serviceName = if ($serverData.servicename) { $serverData.servicename.Trim() } else { "" }
+              $netId       = if (Test-Path "{{ network_id_path }}") {
+                                 (Get-Content -Path "{{ network_id_path }}" -Raw).Trim()
+                             } else {
+                                 "Missing"
+                             }
+
+              @{
+                  HasCountry  = $true
+                  Country     = $country
+                  Servicename = $serviceName
+                  Domain      = $domain
+                  NetworkId   = $netId
+              } | ConvertTo-Json -Compress
+          register: target_wmi_raw
+          when: not stop_processing
+
+        - name: Parse target VM metadata
+          ansible.builtin.set_fact:
+            target_meta: "{{ target_wmi_raw.output[0] | from_json }}"
+          when: not stop_processing
+
+        # ------------------------------------------------------------------
+        # 4. Pre-Flight Checks: Country & Exclusions (Exits 26, 23, 22)
+        # ------------------------------------------------------------------
+        - name: Abort if Server Country Data is missing (Exit 26)
+          ansible.builtin.set_fact:
+            exit_code: 26
+            exit_reason: "Server Country Data not available"
+            stop_processing: true
+          when:
+            - not stop_processing
+            - not (target_meta.HasCountry | bool)
+
+        - name: Abort if Server is in Exclusion List (Exit 23)
+          ansible.builtin.set_fact:
+            exit_code: 23
+            exit_reason: "Server is in Exclusion list"
+            stop_processing: true
+          when:
+            - not stop_processing
+            - (ansible_hostname | lower) in server_exclusion_list
+
+        - name: Abort if Service is in Exclusion List (Exit 22)
+          ansible.builtin.set_fact:
+            exit_code: 22
+            exit_reason: "Service is in Exclusion list"
+            stop_processing: true
+          when:
+            - not stop_processing
+            - (target_meta.Servicename | lower) in service_exclusion_list
+
+        # ------------------------------------------------------------------
+        # 5. Match Country & Domain against AAPMapping.csv
+        # ------------------------------------------------------------------
+        - name: Match target VM Country and Domain in AAPMapping.csv
+          ansible.builtin.set_fact:
+            matched_mapping: >-
+              {{
+                aap_mapping_rows
+                | selectattr('Country', 'equalto', target_meta.Country)
+                | selectattr('Domain', 'equalto', target_meta.Domain)
+                | list | first | default({})
+              }}
+          when: not stop_processing
+
+        - name: Complete with Exit 0 if server is not mapped or AAPInstance is None
+          ansible.builtin.set_fact:
+            exit_code: 0
+            exit_reason: "Server out of scope or AAPInstance is None"
+            stop_processing: true
+          when:
+            - not stop_processing
+            - matched_mapping | length == 0 or (matched_mapping.AAPInstance | default('None')) == 'None'
+
+        # ------------------------------------------------------------------
+        # 6. Normalize Group Names & Stage Local Groups (When Testing Without AD)
+        # ------------------------------------------------------------------
+        - name: Extract DC and EIP group names
+          ansible.builtin.set_fact:
+            raw_dc_group: "{{ matched_mapping.AAP_DCGroupName | default('AAP_DC_Group') }}"
+            raw_eip_group: "{{ matched_mapping.AAP_EIPGroupName | default('AAP_EIP_Group') }}"
+            leaf_dc_group: "{{ (matched_mapping.AAP_DCGroupName | default('AAP_DC_Group')).split('\\')[-1] }}"
+            leaf_eip_group: "{{ (matched_mapping.AAP_EIPGroupName | default('AAP_EIP_Group')).split('\\')[-1] }}"
+          when: not stop_processing
+
+        - name: Ensure local test groups exist on standalone VM (local_test_mode=true)
+          ansible.windows.win_group:
+            name: "{{ item }}"
+            description: "Local test group for AAP validation (No AD)"
+            state: present
+          loop:
+            - "{{ leaf_dc_group }}"
+            - "{{ leaf_eip_group }}"
+          when:
+            - not stop_processing
+            - local_test_mode | bool
+            - item not in ['AAP_DC_Group', 'AAP_EIP_Group', '']
+
+        # ------------------------------------------------------------------
+        # 7. Add DC & EIP Groups to Local Administrators
+        # ------------------------------------------------------------------
+        - name: Mark DC Group as not defined
+          ansible.builtin.set_fact:
+            dc_group_status: "AAP_DC_Group_Not_Defined"
+          when:
+            - not stop_processing
+            - raw_dc_group in ['AAP_DC_Group', '']
+
+        - name: Add DC Group to Local Administrators
+          ansible.windows.win_group_membership:
+            name: Administrators
+            members:
+              - "{{ leaf_dc_group if (local_test_mode | bool) else raw_dc_group }}"
+            state: present
+          register: dc_add_result
+          ignore_errors: true
+          when:
+            - not stop_processing
+            - raw_dc_group not in ['AAP_DC_Group', '']
+
+        - name: Set DC Group status
+          ansible.builtin.set_fact:
+            dc_group_status: >-
+              {% if dc_add_result is failed %}Failed
+              {% elif dc_add_result is changed %}Added
+              {% else %}Exists{% endif %}
+          when:
+            - not stop_processing
+            - raw_dc_group not in ['AAP_DC_Group', '']
+
+        - name: Mark EIP Group as not defined
+          ansible.builtin.set_fact:
+            eip_group_status: "AAP_EIP_Group_Not_Defined"
+          when:
+            - not stop_processing
+            - raw_eip_group in ['AAP_EIP_Group', '']
+
+        - name: Add EIP Group to Local Administrators
+          ansible.windows.win_group_membership:
+            name: Administrators
+            members:
+              - "{{ leaf_eip_group if (local_test_mode | bool) else raw_eip_group }}"
+            state: present
+          register: eip_add_result
+          ignore_errors: true
+          when:
+            - not stop_processing
+            - raw_eip_group not in ['AAP_EIP_Group', '']
+
+        - name: Set EIP Group status
+          ansible.builtin.set_fact:
+            eip_group_status: >-
+              {% if eip_add_result is failed %}Failed
+              {% elif eip_add_result is changed %}Added
+              {% else %}Exists{% endif %}
+          when:
+            - not stop_processing
+            - raw_eip_group not in ['AAP_EIP_Group', '']
+
+        # ------------------------------------------------------------------
+        # 8. Determine Final Exit Code (0, 1, 2, 3)
+        # ------------------------------------------------------------------
+        - name: Calculate final exit code
+          ansible.builtin.set_fact:
+            exit_code: >-
+              {% set dc = dc_group_status | trim %}
+              {% set eip = eip_group_status | trim %}
+              {% if dc == 'Failed' and eip == 'Failed' %}2
+              {% elif dc in ['Exists', 'AAP_DC_Group_Not_Defined'] and eip in ['Exists', 'AAP_EIP_Group_Not_Defined'] %}0
+              {% elif dc == 'Added' and eip == 'Added' %}1
+              {% else %}3{% endif %}
+          when: not stop_processing
+
+        - name: Set human-readable summary reason
+          ansible.builtin.set_fact:
+            exit_reason: >-
+              {% set code = exit_code | int %}
+              {% if code == 0 %}Groups already exist or not defined
+              {% elif code == 1 %}Groups successfully added
+              {% elif code == 2 %}Both groups failed to add
+              {% elif code == 3 %}Partially successful (one group added/exists, one failed/not defined)
+              {% else %}Completed{% endif %}
+          when: not stop_processing
+
+      # --------------------------------------------------------------------
+      # Exception Handling (Mirrors PowerShell catch { exit 20 })
+      # --------------------------------------------------------------------
+      rescue:
+        - name: Catch unexpected playbook or WinRM/CSV error (Exit 20)
+          ansible.builtin.set_fact:
+            exit_code: 20
+            exit_reason: "Execution failed: {{ ansible_failed_result.msg | default('Unhandled exception') }}"
+
+      # --------------------------------------------------------------------
+      # Clean Execution Summary in AAP Job Log
+      # --------------------------------------------------------------------
+      always:
+        - name: Display Clean Execution Summary
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "Target VM        : {{ ansible_hostname }}"
+              - "Domain / Workgrp : {{ target_meta.Domain | default('N/A') }}"
+              - "Network ID       : {{ target_meta.NetworkId | default('N/A') }}"
+              - "Country          : {{ target_meta.Country | default('N/A') }}"
+              - "Service Name     : {{ target_meta.Servicename | default('N/A') }}"
+              - "Local Test Mode  : {{ local_test_mode }}"
+              - "------------------------------------------------------------"
+              - "DC Group         : {{ leaf_dc_group | default('N/A') }} -> {{ dc_group_status | trim }}"
+              - "EIP Group        : {{ leaf_eip_group | default('N/A') }} -> {{ eip_group_status | trim }}"
+              - "------------------------------------------------------------"
+              - "Exit Code        : {{ exit_code | int }}"
+              - "Summary          : {{ exit_reason | trim }}"
+              - "============================================================"
+
+        - name: Mark AAP Job Failed on Critical Exit Codes (2 or 20)
+          ansible.builtin.fail:
+            msg: "Exit {{ exit_code | int }} - {{ exit_reason | trim }}"
+          when: (exit_code | int) in [2, 20]
