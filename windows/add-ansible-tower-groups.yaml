@@ -1,6 +1,6 @@
 ---
 - name: Configure AAP Local Administrator Groups on Windows VMs
-  hosts: all
+  hosts: test-vm
   gather_facts: true
   vars:
     # CSV files live in the AAP Git Project under files/
