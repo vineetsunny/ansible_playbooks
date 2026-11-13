@@ -35,6 +35,9 @@
             - { key: "service_excl", file: "AAP_Service_Exclusion.csv" }
           delegate_to: localhost
           become: false
+          vars:                         
+            ansible_connection: local
+            ansible_shell_type: sh
 
         - name: Parse loaded CSV datasets into facts
           ansible.builtin.set_fact:
