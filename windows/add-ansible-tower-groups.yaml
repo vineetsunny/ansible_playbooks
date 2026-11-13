@@ -1,6 +1,55 @@
+# =============================================================================
+# Playbook Name : add-ansible-tower-groups.yaml
+#
+# Description   : Configures AAP DC and EIP Active Directory (AD) security
+#                 groups on Windows VMs by adding the mapped AD groups
+#                 to the local Administrators group.
+#
+# Purpose       : Ensure the required DC and EIP AD groups are assigned
+#                 to the local Administrators group based on the server's
+#                 Country and Domain mapping in AAPMapping.csv.
+#
+# Scope         : Windows servers / VMs
+#
+# Configuration: AAPMapping.csv - Country, Domain and AD group mapping.
+#                 AAP_Server_Exclusion.csv  - Servers excluded from execution.
+#                 AAP_Service_Exclusion.csv - Services excluded from execution.
+#
+# Pre-Checks    : Domain Controller detection using ProductType registry key.
+#                 HS_ServerData WMI class must contain Country information.
+#                 Server and service exclusion lists are validated.
+#                 Country and Domain must match an entry in AAPMapping.csv.
+#
+# Actions       : 1. Load CSV mapping and exclusion files from AAP project.
+#                 2. Identify whether the target VM is a Domain Controller.
+#                 3. Retrieve Country, Service Name, Domain and Network ID.
+#                 4. Validate server and service exclusion lists.
+#                 5. Match Country and Domain against AAPMapping.csv.
+#                 6. Extract and normalize DC and EIP AD group names.
+#                 7. Add the mapped DC AD group to local Administrators.
+#                 8. Add the mapped EIP AD group to local Administrators.
+#                 9. Determine individual group status and final exit code.
+#
+# Execution     : ansible-playbook -i inventory aap-local-admin-groups.yaml
+#
+# Exit Codes    : 0  - Groups already exist, are not defined, or server
+#                      is out of scope / AAPInstance is None.
+#                 1  - Both DC and EIP groups successfully added.
+#                 2  - Both DC and EIP group additions failed.
+#                 3  - Partial success (one group added/exists and the
+#                      other failed or is not defined).
+#                 20 - Unexpected execution failure.
+#                 22 - Service is in exclusion list.
+#                 23 - Server is in exclusion list.
+#                 24 - Target server is a Domain Controller.
+#                 26 - Server Country data is not available.
+#
+# Version       : 1.0
+# =============================================================================
+
 ---
 - name: Configure AAP Local Administrator Groups on Windows VMs
-  hosts: test-vm
+  hosts: <targetHost>
   gather_facts: true
   vars:
     # CSV files live in the AAP Git Project under files/
