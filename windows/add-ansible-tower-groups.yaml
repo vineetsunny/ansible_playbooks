@@ -162,8 +162,10 @@
           ansible.builtin.set_fact:
             raw_dc_group: "{{ matched_mapping.AAP_DCGroupName | default('AAP_DC_Group', true) | trim }}"
             raw_eip_group: "{{ matched_mapping.AAP_EIPGroupName | default('AAP_EIP_Group', true) | trim }}"
-            leaf_dc_group: "{{ (matched_mapping.AAP_DCGroupName | default('AAP_DC_Group', true) | trim).split('\\')[-1] }}"
-            leaf_eip_group: "{{ (matched_mapping.AAP_EIPGroupName | default('AAP_EIP_Group', true) | trim).split('\\')[-1] }}"
+            leaf_dc_group: >-
+              {{ (matched_mapping.AAP_DCGroupName | default('AAP_DC_Group', true) | trim).split('\\')[-1] }}
+            leaf_eip_group: >-
+              {{ (matched_mapping.AAP_EIPGroupName | default('AAP_EIP_Group', true) | trim).split('\\')[-1] }}
           when: not stop_processing
           
         - name: Ensure local test groups exist on standalone VM (local_test_mode=true)
