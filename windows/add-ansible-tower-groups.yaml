@@ -10,7 +10,7 @@
     # Override via AAP Job Template Extra Variables:
     # true  = Standalone/WORKGROUP test VM (creates local test groups)
     # false = Production AD-joined VM (adds domain AD groups)
-    local_test_mode: false
+    local_test_mode: true
 
     # ARF Exit Code & Status Tracking
     exit_code: 0
