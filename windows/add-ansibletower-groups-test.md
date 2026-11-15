@@ -129,7 +129,7 @@ msg:
 
 ```
 
-***Test 3. When groups are not being added***
+***Test 3. When groups are not being added(2)***
 
 For this test, parameter `local_test_mode: false`
 
@@ -151,7 +151,7 @@ For this test, parameter `local_test_mode: false`
 
 ```
 
-***Test 4. When groups are partially created***
+***Test 4. When groups are partially created(3)***
 
 For this test, parameter `local_test_mode: false`, removed the group prefix `TESTDOMAIN` from the TESTDOMAIN\AAP_Test_DC_Admins in the csv file.
 
