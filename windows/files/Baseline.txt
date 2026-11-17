@@ -1,1 +1,9 @@
-
+\Processor（*）\*
+\Process (*) \*
+\Memory\*
+\Network Interface(*)\*
+\PhysicalDisk(*)\*
+\Logicaldisk(*) \
+\System\*
+\Cache\*
+\Paging File(*)\*
