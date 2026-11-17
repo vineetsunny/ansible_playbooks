@@ -52,8 +52,8 @@
 
   <Actions Context="Author">
     <Exec>
-      <Command>PowerShell.exe</Command>
-      <Arguments>-NoProfile -ExecutionPolicy Bypass -File "C:\PerfLogs\Setup\BaseLine_Perfmon.ps1"</Arguments>
+      <Command>PowerShell</Command>
+      <Arguments> -File "C:\PerfLogs\Setup\BaseLine_Perfmon.ps1"</Arguments>
     </Exec>
   </Actions>
 
