@@ -1,0 +1,136 @@
+---
+- name: Setup Baseline Performance Monitoring on Windows Servers
+  hosts: all  # In AAP, target inventory/groups are controlled by the Job Template
+  gather_facts: true
+
+  vars:
+    perflogs_base: 'C:\PerfLogs'
+    log_dir: '{{ perflogs_base }}\Logs'
+    csv_dir: '{{ perflogs_base }}\Baseline'
+    setup_dir: '{{ perflogs_base }}\Setup'
+    task_name: 'Baseline Performance Monitoring'
+    setup_files:
+      - Baseline.txt
+      - BaseLine_PerfMon_Task.xml
+      - BaseLine_Perfmon.ps1
+
+  tasks:
+    - name: Initialize host tracking facts
+      ansible.builtin.set_fact:
+        file_suffix: "{{ ansible_date_time.month }}{{ ansible_date_time.day }}"
+        log_timestamp: "{{ ansible_date_time.date }} {{ ansible_date_time.time }}"
+        setup_status: "PENDING"
+        setup_message: ""
+        host_failed: false
+
+    - name: Check if today's baseline log file already exists (Exit 0 logic)
+      ansible.windows.win_find:
+        paths: "{{ csv_dir }}"
+        patterns: "{{ ansible_hostname }}_{{ file_suffix }}*"
+      register: existing_baseline_file
+      ignore_errors: true
+
+    - name: Mark host as skipped if Baseline Perfmon is already running today
+      ansible.builtin.set_fact:
+        setup_status: "SKIPPED"
+        setup_message: "Baseline file for today ({{ ansible_hostname }}_{{ file_suffix }}*) already exists. No action required."
+      when: existing_baseline_file.matched is defined and existing_baseline_file.matched > 0
+
+    # Main Setup Block
+    - name: Execute Baseline Performance Monitor Setup
+      when: existing_baseline_file.matched is not defined or existing_baseline_file.matched == 0
+      block:
+        - name: Ensure PerfLogs directories exist (Logs, Baseline, Setup)
+          ansible.windows.win_file:
+            path: "{{ item }}"
+            state: directory
+          loop:
+            - "{{ log_dir }}"
+            - "{{ csv_dir }}"
+            - "{{ setup_dir }}"
+
+        - name: Copy Baseline setup files from AAP project workspace
+          ansible.windows.win_copy:
+            src: "{{ playbook_dir }}/files/{{ item }}"
+            dest: "{{ setup_dir }}\\{{ item }}"
+            force: true
+          loop: "{{ setup_files }}"
+
+        - name: Import/Recreate Scheduled Task from XML
+          community.windows.win_scheduled_task:
+            name: "{{ task_name }}"
+            path: '\'
+            state: present
+            enabled: true
+            source: "{{ setup_dir }}\\BaseLine_PerfMon_Task.xml"
+            force: true
+
+        - name: Check current status of Logman 'Baseline' Data Collector Set
+          ansible.windows.win_shell: |
+            $query = logman query "Baseline" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Write-Output "NOT_FOUND"
+            } elseif ($query -match "Status:\s+Running") {
+                Write-Output "RUNNING"
+            } else {
+                Write-Output "STOPPED"
+            }
+          register: logman_status
+          changed_when: false
+
+        - name: Recreate and start Logman 'Baseline' counter set if missing or stopped
+          ansible.windows.win_shell: |
+            logman delete "Baseline" 2>$null
+            logman create counter "Baseline" -o "{{ csv_dir }}\{{ ansible_hostname }}" -f csv -v mmddhhmm -cf "{{ setup_dir }}\Baseline.txt" -sc 1440 -si 60
+            logman start "Baseline"
+          when: logman_status.stdout | trim != "RUNNING"
+
+        - name: Verify Logman 'Baseline' counter set is running
+          ansible.windows.win_shell: logman query "Baseline"
+          register: verify_logman
+          changed_when: false
+          failed_when: "'Status: Running' not in verify_logman.stdout"
+
+        - name: Record successful setup status
+          ansible.builtin.set_fact:
+            setup_status: "SUCCESS"
+            setup_message: "Directories created, files copied, Scheduled Task registered, and Logman 'Baseline' counter is Running."
+
+        - name: Write audit entry to local PerfLogs log file
+          ansible.windows.win_lineinfile:
+            path: "{{ log_dir }}\\BaseLine_{{ ansible_date_time.iso8601_basic_short }}.log"
+            line: "{{ log_timestamp }} - AAP Job {{ awx_job_id | default('Manual') }}: Completed Baseline Performance Monitor setup"
+            create: true
+
+      rescue:
+        - name: Record failure status if any task in the block failed
+          ansible.builtin.set_fact:
+            setup_status: "FAILED"
+            setup_message: "Failed at task '{{ ansible_failed_task.name }}': {{ ansible_failed_result.msg | default('Unknown error') }}"
+            host_failed: true
+
+    # AAP Reporting: Artifacts Tab + Console Output + Accurate Job Exit Status
+    - name: Publish summary to AAP Job Artifacts tab
+      ansible.builtin.set_stats:
+        data:
+          perfmon_baseline_summary:
+            "{{ inventory_hostname }}":
+              hostname: "{{ ansible_hostname }}"
+              status: "{{ setup_status }}"
+              details: "{{ setup_message }}"
+        per_host: false
+        aggregate: true
+
+    - name: Display Host Setup Summary in AAP Job Output
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "HOST SUMMARY : {{ inventory_hostname }} ({{ ansible_hostname }})"
+          - "STATUS       : {{ setup_status }}"
+          - "DETAILS      : {{ setup_message }}"
+          - "============================================================"
+
+    - name: Fail host in AAP if setup encountered an error
+      ansible.builtin.fail:
+        msg: "{{ setup_message }}"
+      when: host_failed | bool
