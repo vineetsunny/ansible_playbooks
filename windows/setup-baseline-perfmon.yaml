@@ -70,7 +70,7 @@
                 -TaskName $TaskName `
                 -Xml $TaskXml `
                 -Force
-           Enable-ScheduledTask -TaskName $TaskName
+            Enable-ScheduledTask -TaskName $TaskName
 
         - name: Check current status of Logman 'Baseline' Data Collector Set
           ansible.windows.win_shell: |
