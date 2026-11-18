@@ -1,6 +1,6 @@
 ---
 - name: Setup Baseline Performance Monitoring on Windows Servers
-  hosts: all  # In AAP, target inventory/groups are controlled by the Job Template
+  hosts: win-vm
   gather_facts: true
 
   vars:
