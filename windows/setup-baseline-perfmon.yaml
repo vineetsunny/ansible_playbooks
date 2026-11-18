@@ -74,23 +74,28 @@
 
         - name: Check current status of Logman 'Baseline' Data Collector Set
           ansible.windows.win_shell: |
-            $query = logman query "Baseline" 2>&1
-            if ($LASTEXITCODE -ne 0) {
+            $query = & logman.exe query "Baseline" 2>&1
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -ne 0) {
                 Write-Output "NOT_FOUND"
-            } elseif ($query -match "Status:\s+Running") {
+            }
+            elseif (($query | Out-String) -match "Status:\s+Running") {
                 Write-Output "RUNNING"
-            } else {
+            }
+            else {
                 Write-Output "STOPPED"
             }
           register: logman_status
           changed_when: false
+          failed_when: false
 
         - name: Recreate and start Logman 'Baseline' counter set if missing or stopped
           ansible.windows.win_shell: |
             logman delete "Baseline" 2>$null
             logman create counter "Baseline" -o "{{ csv_dir }}\{{ ansible_hostname }}" -f csv -v mmddhhmm -cf "{{ setup_dir }}\Baseline.txt" -sc 1440 -si 60
             logman start "Baseline"
-          when: logman_status.stdout | trim != "RUNNING"
+          when: (logman_status.stdout | default('') | trim) != "RUNNING"
 
         - name: Verify Logman 'Baseline' counter set is running
           ansible.windows.win_shell: logman query "Baseline"
