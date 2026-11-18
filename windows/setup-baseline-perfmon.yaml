@@ -1,3 +1,43 @@
+# =============================================================================
+# Playbook Name : Setup_Baseline_PerfMon.yml
+#
+# Description   :
+#   Automates the deployment and configuration of Baseline Performance
+#   Monitoring on Windows servers using Windows Performance Monitor (PerfMon).
+#
+# Key Operations:
+#   1. Initialize host-level tracking variables and execution timestamps.
+#   2. Check whether today's Baseline monitoring file already exists.
+#   3. Create required PerfLogs directories (Baseline, Setup, Logs).
+#   4. Copy Baseline configuration and PowerShell setup files from AAP.
+#   5. Import or recreate the Windows Scheduled Task using XML.
+#   6. Check, recreate, and start the Logman Baseline Data Collector Set.
+#   7. Verify that the Baseline Data Collector Set is running.
+#   8. Record SUCCESS, FAILED, or SKIPPED execution status.
+#   9. Generate host-level audit logs under C:\PerfLogs\Logs.
+#  10. Publish execution summaries to AAP Job Artifacts.
+#  11. Display host execution details in AAP Job Output.
+#  12. Report setup failures through Ansible to ensure accurate job status.
+#
+# Target        : Windows Servers (win-vm)
+# Automation    : Ansible Automation Platform (AAP)
+# Monitoring    : Windows Performance Monitor / Logman
+# Collector     : Baseline
+# Sampling      : Every 60 seconds
+# Duration      : 1440 samples
+# Log Format    : CSV
+# Log Location  : C:\PerfLogs\Baseline
+# Audit Location: C:\PerfLogs\Logs
+# Setup Location: C:\PerfLogs\Setup
+#
+#
+# Prerequisites:
+#   - Windows servers must be accessible through WinRM.
+#   - Ansible Windows collection must be available.
+#   - AAP project must contain the required setup files.
+#   - Execution requires appropriate Windows administrative privileges.
+#
+# =============================================================================
 ---
 - name: Setup Baseline Performance Monitoring on Windows Servers
   hosts: win-vm
