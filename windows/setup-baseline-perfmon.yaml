@@ -122,7 +122,7 @@
         state: directory
 
     - name: Write audit entry to local PerfLogs log file
-      community.windows.win_lineinfile:
+      ansible.windows.win_lineinfile:
         path: '{{ log_dir }}\BaseLine_{{ log_file_stamp }}.log'
         line: "{{ log_timestamp }} - AAP Job {{ awx_job_id | default('Manual') }}: {{ setup_status }} - {{ setup_message }}"
         create: true
