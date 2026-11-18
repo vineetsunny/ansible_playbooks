@@ -101,7 +101,9 @@
           ansible.windows.win_shell: logman query "Baseline"
           register: verify_logman
           changed_when: false
-          failed_when: "'Status: Running' not in verify_logman.stdout"
+          failed_when: >-
+            verify_logman.rc != 0 or
+            (verify_logman.stdout | regex_search('(?m)^Status:\s+Running\s*$')) is none
 
         - name: Record successful setup status
           ansible.builtin.set_fact:
@@ -112,7 +114,12 @@
         - name: Record failure status if any task in the block failed
           ansible.builtin.set_fact:
             setup_status: "FAILED"
-            setup_message: "Failed at task '{{ ansible_failed_task.name }}': {{ ansible_failed_result.msg | default('Unknown error') }}"
+            setup_message: >-
+              Failed at task '{{ ansible_failed_task.name }}'.
+              Error: {{ ansible_failed_result.msg |
+              default(ansible_failed_result.stderr |
+              default(ansible_failed_result.stdout |
+              default('No additional error details available'))) }}
             host_failed: true
 
     # Always write audit log (runs for SUCCESS, FAILED, and SKIPPED)
