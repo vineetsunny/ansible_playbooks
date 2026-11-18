@@ -111,7 +111,7 @@
         - name: Write audit entry to local PerfLogs log file
           ansible.windows.win_lineinfile:
             path: "{{ log_dir }}\\BaseLine_{{ ansible_date_time.iso8601_basic_short }}.log"
-            line: "{{ log_timestamp }} - AAP Job {{ awx_job_id | default('Manual') }}: Completed Baseline Performance Monitor setup"
+            line: "{{ log_timestamp }} - AAP Job {{ awx_job_id | default('Manual') }}: {{ setup_status }} - {{ setup_message }}"
             create: true
 
       rescue:
