@@ -57,13 +57,20 @@
           loop: "{{ setup_files }}"
 
         - name: Import/Recreate Scheduled Task from XML
-          community.windows.win_scheduled_task:
-            name: "{{ task_name }}"
-            path: '\'
-            state: present
-            enabled: true
-            source: "{{ setup_dir }}\\BaseLine_PerfMon_Task.xml"
-            force: true
+          ansible.windows.win_shell: |
+            $TaskName = "{{ task_name }}"
+            $XmlPath = "{{ setup_dir }}\BaseLine_PerfMon_Task.xml"
+
+            if (-not (Test-Path $XmlPath)) {
+               throw "Scheduled Task XML not found: $XmlPath"
+            }
+
+            $TaskXml = Get-Content -Path $XmlPath -Raw
+            Register-ScheduledTask `
+                -TaskName $TaskName `
+                -Xml $TaskXml `
+                -Force
+           Enable-ScheduledTask -TaskName $TaskName
 
         - name: Check current status of Logman 'Baseline' Data Collector Set
           ansible.windows.win_shell: |
