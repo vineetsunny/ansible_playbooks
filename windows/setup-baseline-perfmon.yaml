@@ -20,7 +20,7 @@
 # Key Operations:
 #   1. Initialize host-level tracking variables, default Exit 20 state, and timestamps.
 #   2. Create and validate the audit log directory (C:\PerfLogs\Logs -> Exit 2).
-#   3. Verify whether today's Baseline CSV exists AND Logman 'Baseline' is running (Exit 0).
+#   3. Check if Logman 'Baseline' counter set is already Running; if so, skip (Exit 0).
 #   4. Create required PerfLogs directories (Baseline, Setup -> Exit 3).
 #   5. Copy Baseline configuration and task definition files from AAP (Exit 4).
 #   6. Register and enable the Windows Scheduled Task from XML (Exit 5).
@@ -67,7 +67,6 @@
   tasks:
     - name: Initialize host tracking facts (Default Exit 20)
       ansible.builtin.set_fact:
-        file_suffix: "{{ lookup('pipe', 'date +%m%d') }}"
         log_file_stamp: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
         log_timestamp: "{{ lookup('pipe', 'date \"+%Y-%m-%d %H:%M:%S\"') }}"
         exit_code: 20
@@ -94,33 +93,24 @@
       when: log_dir_result is failed
 
     # -------------------------------------------------------------------------
-    # Exit 0 Check: Verify Both Today's CSV File AND Active Logman Status
+    # Exit 0 Check: Do Not Touch If Logman 'Baseline' Is Already Running
     # -------------------------------------------------------------------------
-    - name: Check Logman status and today's baseline file (Exit 0)
+    - name: Check if Logman 'Baseline' counter set is currently running (Exit 0)
+      ansible.windows.win_shell: logman.exe query "Baseline"
+      register: precheck_logman
+      changed_when: false
+      failed_when: false
       when: not (host_failed | bool)
-      block:
-        - name: Check if today's baseline log file already exists
-          ansible.windows.win_find:
-            paths: "{{ csv_dir }}"
-            patterns: "{{ ansible_hostname }}_{{ file_suffix }}*"
-          register: existing_baseline_file
-          ignore_errors: true
 
-        - name: Check if Logman 'Baseline' counter set is currently running
-          ansible.windows.win_shell: logman.exe query "Baseline"
-          register: precheck_logman
-          changed_when: false
-          failed_when: false
-
-        - name: Mark Exit 0 if today's file exists AND collector is running
-          ansible.builtin.set_fact:
-            exit_code: 0
-            setup_status: "SKIPPED"
-            setup_message: "Exit 0 -> Baseline Monitoring Counters are already running, No action required"
-          when:
-            - existing_baseline_file.matched is defined and existing_baseline_file.matched > 0
-            - precheck_logman.rc == 0
-            - (precheck_logman.stdout | regex_search('(?m)^Status:\s+Running\s*$')) is not none
+    - name: Mark Exit 0 if Baseline Monitoring Counters are already running
+      ansible.builtin.set_fact:
+        exit_code: 0
+        setup_status: "SKIPPED"
+        setup_message: "Exit 0 -> Baseline Monitoring Counters are already running, No action required"
+      when:
+        - not (host_failed | bool)
+        - precheck_logman.rc == 0
+        - (precheck_logman.stdout | regex_search('(?m)^Status:\s+Running\s*$')) is not none
 
     # -------------------------------------------------------------------------
     # Main Setup Block: Maps Exits 3, 4, 5, 6 -> Exit 1 on Completion
@@ -170,7 +160,7 @@
             step_exit_code: 5
             step_error_label: "Exit 5 -> Failed to create Task Scheduler"
 
-        - name: Recreate and start Logman 'Baseline' counter set
+        - name: Create and start Logman 'Baseline' counter set
           ansible.windows.win_shell: |
             logman delete "Baseline" 2>$null
             logman create counter "Baseline" -o "{{ csv_dir }}\{{ ansible_hostname }}" -f csv -v mmddhhmm -cf "{{ setup_dir }}\Baseline.txt" -sc 1440 -si 60
