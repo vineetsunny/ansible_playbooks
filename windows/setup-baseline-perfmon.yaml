@@ -1,7 +1,7 @@
 # =============================================================================
-# Playbook Name : Setup_Baseline_PerfMon.yml
+# Playbook Name : Setup_Baseline_PerfMon.yaml
 #
-# Synopsis      :
+# Synopsis :
 #   Automates the deployment, validation, and lifecycle management of Windows
 #   Performance Monitor (PerfMon) Baseline Data Collector Sets across target
 #   Windows servers via Ansible Automation Platform (AAP). Ensures idempotent
@@ -17,21 +17,8 @@
 #   Exit 6  -> Failed to setup BaseLine Performance Monitor
 #   Exit 20 -> Script / Playbook failed to execute (Unhandled / Default)
 #
-# Key Operations:
-#   1. Initialize host-level tracking variables, default Exit 20 state, and timestamps.
-#   2. Create and validate the audit log directory (C:\PerfLogs\Logs -> Exit 2).
-#   3. Check if Logman 'Baseline' counter set is already Running; if so, skip (Exit 0).
-#   4. Create required PerfLogs directories (Baseline, Setup -> Exit 3).
-#   5. Copy Baseline configuration and task definition files from AAP (Exit 4).
-#   6. Register and enable the Windows Scheduled Task from XML (Exit 5).
-#   7. Recreate, start, and verify the Logman 'Baseline' Data Collector Set (Exit 6).
-#   8. Record final Exit Code (0-6, 20) and status (SUCCESS, FAILED, SKIPPED -> Exit 1).
-#   9. Write host-level audit logs under C:\PerfLogs\Logs (skipped only on Exit 2).
-#  10. Publish structured execution summaries to AAP Job Artifacts (set_stats).
-#  11. Display per-host execution summary in AAP Job Output and fail failed hosts.
-#
-# Target        : Windows Servers (win-vm)
-# Automation    : Ansible Automation Platform (AAP)
+# Target        : Windows Servers
+# Automation    : Ansible Automation Platform
 # Monitoring    : Windows Performance Monitor / Logman
 # Collector     : Baseline
 # Sampling      : Every 60 seconds
@@ -74,9 +61,8 @@
         setup_message: "Exit 20 -> Script failed to execute"
         host_failed: false
 
-    # -------------------------------------------------------------------------
     # Exit 2 Check: Create Logs Folder First
-    # -------------------------------------------------------------------------
+
     - name: Ensure PerfLogs log directory exists (Exit 2)
       ansible.windows.win_file:
         path: "{{ log_dir }}"
@@ -92,9 +78,9 @@
         host_failed: true
       when: log_dir_result is failed
 
-    # -------------------------------------------------------------------------
+
     # Exit 0 Check: Do Not Touch If Logman 'Baseline' Is Already Running
-    # -------------------------------------------------------------------------
+
     - name: Check if Logman 'Baseline' counter set is currently running (Exit 0)
       ansible.windows.win_shell: logman.exe query "Baseline"
       register: precheck_logman
@@ -112,14 +98,19 @@
         - precheck_logman.rc == 0
         - (precheck_logman.stdout | regex_search('(?m)^Status:\s+Running\s*$')) is not none
 
-    # -------------------------------------------------------------------------
+ 
     # Main Setup Block: Maps Exits 3, 4, 5, 6 -> Exit 1 on Completion
-    # -------------------------------------------------------------------------
+
     - name: Execute Baseline Performance Monitor Setup
       when:
         - not (host_failed | bool)
         - (exit_code | int) != 0
       block:
+        # ---> ADD THIS TEMPORARY TASK HERE <---
+        - name: Temporary unhandled failure test (Exit 20)
+          ansible.builtin.fail:
+            msg: "Simulated unhandled block failure"
+            
         - name: Ensure PerfLogs directories exist (Baseline, Setup)
           ansible.windows.win_file:
             path: "{{ item }}"
@@ -201,9 +192,8 @@
               default('No additional error details available'))) }}
             host_failed: true
 
-    # -------------------------------------------------------------------------
     # Audit Logging (Runs whenever Logs directory succeeded, i.e., Exit != 2)
-    # -------------------------------------------------------------------------
+    
     - name: Write audit entry to local PerfLogs log file
       ansible.windows.win_lineinfile:
         path: '{{ log_dir }}\BaseLine_{{ log_file_stamp }}.log'
@@ -211,9 +201,8 @@
         create: true
       when: (exit_code | int) != 2
 
-    # -------------------------------------------------------------------------
     # AAP Reporting: Artifacts Tab + Console Output + Accurate Job Exit Status
-    # -------------------------------------------------------------------------
+
     - name: Publish summary to AAP Job Artifacts tab
       ansible.builtin.set_stats:
         data:
