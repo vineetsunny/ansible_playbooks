@@ -105,12 +105,7 @@
       when:
         - not (host_failed | bool)
         - (exit_code | int) != 0
-      block:
-        # ---> ADD THIS TEMPORARY TASK HERE <---
-        - name: Temporary unhandled failure test (Exit 20)
-          ansible.builtin.fail:
-            msg: "Simulated unhandled block failure"
-            
+      block:            
         - name: Ensure PerfLogs directories exist (Baseline, Setup)
           ansible.windows.win_file:
             path: "{{ item }}"
