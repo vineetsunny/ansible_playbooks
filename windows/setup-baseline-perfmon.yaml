@@ -1,7 +1,7 @@
 # =============================================================================
-# Playbook Name : Setup_Baseline_PerfMon.yaml
+# Playbook Name : setup_baseline_perfmon.yaml
 #
-# Synopsis :
+# Purpose:
 #   Automates the deployment, validation, and lifecycle management of Windows
 #   Performance Monitor (PerfMon) Baseline Data Collector Sets across target
 #   Windows servers via Ansible Automation Platform (AAP). Ensures idempotent
@@ -34,6 +34,8 @@
 #   - AAP project workspace must contain files/Baseline.txt,
 #     files/BaseLine_PerfMon_Task.xml, and files/BaseLine_Perfmon.ps1.
 #   - Execution requires Windows local Administrator privileges.
+# 
+#  Version: 1.0
 # =============================================================================
 ---
 - name: Setup Baseline Performance Monitoring on Windows Servers
